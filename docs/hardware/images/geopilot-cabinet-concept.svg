@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="720" viewBox="0 0 1000 720">
+  <rect width="1000" height="720" fill="#f7faf9"/>
+  <text x="65" y="60" font-family="Arial" font-size="32" font-weight="700" fill="#143c35">GeoPilot pilot cabinet concept</text>
+  <rect x="120" y="100" width="760" height="540" rx="22" fill="#eef3f1" stroke="#2f5349" stroke-width="6"/>
+  <line x1="165" y1="280" x2="835" y2="280" stroke="#637d76" stroke-width="10"/>
+  <line x1="165" y1="480" x2="835" y2="480" stroke="#637d76" stroke-width="10"/>
+  <g font-family="Arial" font-size="22" text-anchor="middle" fill="#143c35">
+    <rect x="180" y="145" width="230" height="90" rx="12" fill="#d6ebe4" stroke="#0d8163" stroke-width="3"/>
+    <text x="295" y="182" font-weight="700">24 VDC power</text><text x="295" y="215">and protection</text>
+    <rect x="470" y="145" width="320" height="90" rx="12" fill="#d6ebe4" stroke="#0d8163" stroke-width="3"/>
+    <text x="630" y="182" font-weight="700">Isolated DC/DC</text><text x="630" y="215">and distribution</text>
+    <rect x="180" y="335" width="270" height="95" rx="12" fill="#c7eadf" stroke="#0d8163" stroke-width="3"/>
+    <text x="315" y="375" font-weight="700">GeoPilot node</text><text x="315" y="410">Compute + SSD</text>
+    <rect x="520" y="335" width="270" height="95" rx="12" fill="#e0efea" stroke="#2f5349" stroke-width="3"/>
+    <text x="655" y="375" font-weight="700">Network</text><text x="655" y="410">Ethernet switch</text>
+    <rect x="180" y="535" width="610" height="65" rx="12" fill="#f8fbfa" stroke="#637d76" stroke-width="3"/>
+    <text x="485" y="575" font-weight="700">Field terminals: RS-485, sensors, PE and spare capacity</text>
+  </g>
+</svg>

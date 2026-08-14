@@ -1,0 +1,42 @@
+[Unit]
+Description=GeoPilot continuous acquisition
+Documentation=file:///opt/geopilot/docs/DEPLOYMENT.md
+After=multi-user.target
+
+[Service]
+# Long-running alternative to the timer, for intervals below one minute where
+# starting a Python process per cycle would cost more than the reading.
+Type=simple
+User=geopilot
+Group=geopilot
+SupplementaryGroups=dialout
+
+WorkingDirectory=/opt/geopilot
+ExecStart=/opt/geopilot/venv/bin/python /opt/geopilot/tools/geopilot_poll.py \
+    --config /etc/geopilot/installation.toml --interval 30 --quiet
+
+StateDirectory=geopilot
+StateDirectoryMode=0750
+
+Restart=always
+RestartSec=10s
+
+# The process handles SIGTERM by finishing the current cycle and stopping, so
+# a restart or a shutdown never interrupts a write. Allow a full cycle to
+# complete before systemd escalates to SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=120
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

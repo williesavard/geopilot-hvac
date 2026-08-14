@@ -1,0 +1,24 @@
+[Unit]
+Description=Run a GeoPilot acquisition cycle periodically
+Documentation=file:///opt/geopilot/docs/DEPLOYMENT.md
+
+[Timer]
+# Give the bus and the clock time to settle after boot. A measurement stamped
+# before NTP has synchronised is worse than a missing one.
+OnBootSec=2min
+
+# Interval between cycles, measured from the last activation.
+OnUnitActiveSec=1min
+
+# systemd spreads timers to avoid thundering herds. Tighten it so samples land
+# where they claim to.
+AccuracySec=5s
+
+# Do not replay missed cycles after downtime. A measurement taken now must not
+# be recorded as if it happened during the outage.
+Persistent=false
+
+Unit=geopilot-poll.service
+
+[Install]
+WantedBy=timers.target

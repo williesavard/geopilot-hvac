@@ -1,0 +1,101 @@
+# GeoPilot installation configuration, example.
+#
+# This file describes one installation: what exists, what to read, and where to
+# store it. Copy it, edit it, and keep the comments. The comments are the point:
+# a register address without a documented source is not usable.
+#
+# Nothing here is a validated register map. Every address below is a placeholder
+# for a bench device and must be replaced with values taken from the device
+# manual, per docs/HARDWARE_BENCH_RUNBOOK.md.
+
+version = 1
+
+[storage]
+# One SQLite file. Back it up per docs/BACKUP_AND_RESTORE.md.
+database = "geopilot.sqlite3"
+
+[residence]
+id = "residence_home"
+name = "Home"
+timezone = "America/Toronto"
+
+[[system]]
+id = "system_geothermal"
+name = "Geothermal system"
+system_type = "hydronic"
+
+[[equipment]]
+id = "equipment_heat_pump"
+system_id = "system_geothermal"
+name = "Heat pump"
+equipment_type = "heat_pump"
+
+[[sensor]]
+id = "sensor_bench_temperature"
+equipment_id = "equipment_heat_pump"
+name = "Bench temperature"
+measurement_kind = "temperature"
+sensor_kind = "temperature"
+unit = "degC"
+source_id = "source_bench_bus"
+
+[[source]]
+# Serial framing must match the device. Defaults shown explicitly.
+id = "source_bench_bus"
+port = "/dev/cu.usbserial-XXXXXXXX"
+baudrate = 9600
+parity = "N"
+stopbits = 1
+bytesize = 8
+timeout = 1.0
+
+[[read]]
+# PLACEHOLDER. Replace address, register family, data type, scale and offset
+# with values from the device manual, and record where they came from in
+# source_reference. A read whose source_reference is vague is a read nobody can
+# audit later.
+id = "read_bench_temperature"
+source_id = "source_bench_bus"
+sensor_id = "sensor_bench_temperature"
+unit_id = 1
+register = "input"
+address = 1
+quantity = 1
+data_type = "int16"
+unit = "degC"
+scale = 0.1
+offset = 0.0
+source_reference = "TBD - replace with the device manual reference"
+
+# ---------------------------------------------------------------------------
+# 1-Wire DS18B20 probes, for pipe temperatures.
+#
+# Requires the Linux kernel 1-Wire modules. Probe ids are the ROM ids the
+# kernel exposes under /sys/bus/w1/devices, for example 28-0000075b2c3f. They
+# are unique and stable per probe, which makes them a good natural key.
+
+[[onewire_source]]
+id = "source_probes"
+root = "/sys/bus/w1/devices"
+
+[[onewire_read]]
+# offset_celsius carries the same-bath calibration correction. Put every probe
+# in one glass of water, record what each one reads, and enter the difference
+# here. Absolute accuracy barely matters for a loop delta T; agreement between
+# the two probes matters enormously, and this is what buys it.
+id = "read_loop_in"
+source_id = "source_probes"
+sensor_id = "sensor_loop_in_probe"
+device_id = "28-0000075b2c3f"
+unit = "degC"
+offset_celsius = 0.0
+source_reference = "same-bath calibration, date TBD"
+
+[[sensor]]
+id = "sensor_loop_in_probe"
+equipment_id = "equipment_heat_pump"
+name = "Ground loop entering"
+measurement_kind = "temperature"
+sensor_kind = "temperature"
+unit = "degC"
+source_id = "source_probes"

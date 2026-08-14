@@ -1,0 +1,13 @@
+extends: default
+
+ignore: |
+  .mypy_cache/
+  .pytest_cache/
+  .ruff_cache/
+  .venv/
+  build/
+
+rules:
+  document-start: disable
+  line-length: disable
+  truthy: disable

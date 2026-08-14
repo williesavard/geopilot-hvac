@@ -1,0 +1,46 @@
+[Unit]
+Description=GeoPilot acquisition cycle
+Documentation=file:///opt/geopilot/docs/DEPLOYMENT.md
+After=multi-user.target
+
+[Service]
+Type=oneshot
+User=geopilot
+Group=geopilot
+
+# Serial port access on Debian and Raspberry Pi OS. Drop this line if the
+# installation has no Modbus source.
+SupplementaryGroups=dialout
+
+WorkingDirectory=/opt/geopilot
+ExecStart=/opt/geopilot/venv/bin/python /opt/geopilot/tools/geopilot_poll.py \
+    --config /etc/geopilot/installation.toml --once --quiet
+
+# /var/lib/geopilot, created and owned automatically. Point the configuration
+# database at an absolute path inside it.
+StateDirectory=geopilot
+StateDirectoryMode=0750
+
+# A failed read is data, not a unit failure. Exit 2 means at least one read
+# failed, which is normal on a bus with an intermittent device, and must not
+# mark the unit failed or a year of recording becomes a year of alerts.
+# Exit 1 is a configuration problem and does fail the unit.
+SuccessExitStatus=0 2
+
+# One cycle should take seconds. A 1-Wire probe blocks roughly 750 ms during
+# conversion, so allow room for several probes plus Modbus timeouts.
+TimeoutStartSec=120
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

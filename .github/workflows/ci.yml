@@ -1,0 +1,81 @@
+name: Quality
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  markdown:
+    name: Markdown lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Install markdownlint
+        run: npm install --global markdownlint-cli2@0.18.1
+      - name: Lint Markdown
+        run: markdownlint-cli2
+
+  yaml:
+    name: YAML validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install yamllint
+        run: python -m pip install yamllint==1.37.1
+      - name: Validate YAML
+        run: yamllint .
+
+  python:
+    name: Python quality (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      # The optional modbus extra is deliberately not installed. CI must prove
+      # that GeoPilot works without pyserial, and hardware tests must stay out.
+      - name: Install project with development tools
+        run: python -m pip install --editable ".[dev]"
+      - name: Confirm the core does not require pyserial
+        run: python -c "import geopilot.modbus_pyserial_transport"
+      - name: Lint with ruff
+        run: ruff check backend/src/geopilot examples tests tools
+      - name: Type check with mypy
+        run: mypy backend/src/geopilot examples tests tools
+      - name: Run tests
+        run: pytest
+      - name: Run simulated examples
+        run: |
+          python examples/simulated_snapshot.py
+          python examples/simulated_history.py
+          python examples/export_simulated_history.py
+          python examples/simulated_polling_cycle.py

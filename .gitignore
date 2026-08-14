@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+.venv/
+venv/
+
+# ESPHome generated output and local credentials
+.esphome/
+esphome/.esphome/
+esphome/secrets.yaml
+*.bin
+
+# Home Assistant runtime state
+config/.storage/
+config/home-assistant.log*
+config/home-assistant_v2.db*
+
+# Models, data, and notebooks
+data/
+models/
+*.onnx
+*.pkl
+*.joblib
+.ipynb_checkpoints/
+
+# Editors and operating systems
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Environment and secret files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Private installation records. These describe a specific residence: its
+# equipment, mechanical room and electrical layout. CONTRIBUTING.md forbids
+# committing precise locations, equipment serial numbers or household
+# telemetry, so they stay local.
+docs/hardware/SITE.md
+docs/hardware/BENCH_NOTES.md
