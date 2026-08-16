@@ -114,19 +114,74 @@ minimum that never occurred, and it would look entirely plausible.
 Both sensors must carry the same unit. Comparing a temperature against a zone
 call is refused rather than subtracted.
 
-### What the daily mean is not
+### Filtering by a state sensor
 
-In the table above the daily mean falls from 1.42 to 0.97 — but so does the
-`max`, from 3.33 to 2.25, and those two numbers are not saying the same thing.
-**The mean mixes running and idle time.** A day when the equipment ran less
-produces a smaller mean delta with no change whatsoever in the loop's behaviour.
+An unfiltered mean delta **mixes running and idle time**, and that is not a
+detail. Here are four days of the same loop, first unfiltered:
 
-The `max` column is closer to the delta while running, but it is an extreme and
-one bad reading moves it.
+```text
+starts at                    count        min        max       mean
+2026-01-12T00:00:00-05:00      288       0.12      3.295      1.412
+2026-01-13T00:00:00-05:00      288       0.12       2.95       1.49
+2026-01-14T00:00:00-05:00      288       0.12      2.605      1.509
+2026-01-15T00:00:00-05:00      288       0.12       2.26      1.467
+```
 
-There is no way here to restrict a delta to the periods when the equipment was
-actually running. That needs the delta filtered by a `state` sensor, and it is
-the obvious next thing this is missing.
+Flat. Nothing to say. Now the same four days, restricted to the moments the
+compressor was actually running:
+
+```bash
+python3 tools/geopilot_report.py --database geopilot.sqlite3 \
+    --sensor sensor_loop_in --minus sensor_loop_out \
+    --while sensor_compressor --bucket 1d
+```
+
+```text
+starts at                    count        min        max       mean
+2026-01-12T00:00:00-05:00      120      3.146      3.295      3.221
+2026-01-13T00:00:00-05:00      144      2.772       2.95      2.861
+2026-01-14T00:00:00-05:00      168      2.396      2.605      2.501
+2026-01-15T00:00:00-05:00      192      2.021       2.26      2.141
+```
+
+A clean decline, and the `count` column shows what was hiding it: the equipment
+ran longer each day, so the unfiltered mean was pulled up by more running hours
+at the same time as it was pulled down by a weaker delta. The two cancelled.
+
+`--while` works on plain summaries and single-sensor buckets too — the average
+loop temperature *while the compressor was running*, rather than an average
+diluted by every hour it was not.
+
+### What the gate is allowed to assume
+
+The state sensor is sampled on the same cycle as everything else, so its
+readings do not line up exactly with the temperatures either. Each observation
+is matched to the nearest state reading within `--tolerance`, and:
+
+- **a state reading is reused, not consumed.** A state is a level, and the same
+  observation legitimately describes every moment near it. Reuse cannot inflate
+  anything, because the gate contributes no value — it only answers yes or no.
+  This is the opposite of the delta pairing, deliberately;
+- **it will not reach past the tolerance.** Beyond that the signal is
+  unobserved, and an unobserved state is not an asserted one.
+
+Only a sensor recorded in the `state` unit can be a gate. Naming a temperature
+is refused, and so is naming a sensor with no observations at all — a typo must
+not read as an installation that never ran.
+
+### What the gate costs, and what it still hides
+
+Gating walks the rows in Python instead of aggregating in SQL. Plain ungated
+buckets stay in SQL, so the cost is paid only when a gate is asked for.
+
+**A gated bucket that is absent is ambiguous.** The equipment being off all
+afternoon and the recorder being off all afternoon produce the same missing
+bucket. The neighbouring `count` values and an ungated `coverage` run are what
+tell them apart.
+
+**A gate says the signal was asserted, not that the machine was healthy.** If
+the compressor call is closed while the compressor is locked out, the gate lets
+those moments through. Nothing here can tell the difference.
 
 | Exit code | Meaning |
 | --- | --- |
@@ -214,9 +269,12 @@ itself a fault worth seeing.
 of 20 and 68 is a number with no meaning. Coverage still lists both, as separate
 rows, which is how you notice.
 
-**It compares two sensors, not three.** A delta has exactly two ends, and there
-is no way to condition one series on another — see the note on running versus
-idle above.
+**It compares two sensors, not three.** A delta has exactly two ends. A third
+sensor can only ever be a `state` gate, never another term.
+
+**It conditions on one gate, and only on assertion.** There is no way to ask for
+"while zone 1 called *and* the outdoor temperature was below −10", nor for
+"while the compressor was *off*". Both are ordinary extensions; neither is here.
 
 **Its largest gap and its pairing are computed in Python** rather than in SQL.
 The pairing streams both series and holds two rows at a time, so it does not
@@ -247,3 +305,9 @@ consumed rather than reused, the nearest of two candidates winning, unpaired
 counts, refusing mismatched units and a sensor against itself, and the case that
 justifies pairwise aggregation — two pairs whose deltas are 1.0 and 2.0, where
 subtracting the bucket minima would have claimed a minimum of 2.0.
+
+For gating: the same four readings giving a mean of 1.55 unfiltered and 3.0
+filtered, excluded counts kept separate from unpaired ones, a state reading
+being reused where a delta partner would have been consumed, the gate refusing
+to reach past its tolerance, and the three refusals — a non-state sensor, an
+unknown sensor, and a sensor absent from the window.

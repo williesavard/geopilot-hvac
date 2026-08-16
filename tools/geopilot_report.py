@@ -14,9 +14,10 @@ Answers the questions a recording exists to answer, without a dashboard.
     python3 tools/geopilot_report.py --database db.sqlite3 \
         --sensor sensor_loop_in --bucket 1h --csv > loop.csv
 
-    # the loop delta, day by day
+    # the loop delta, day by day, only while the compressor was running
     python3 tools/geopilot_report.py --database db.sqlite3 \
-        --sensor sensor_loop_in --minus sensor_loop_out --bucket 1d
+        --sensor sensor_loop_in --minus sensor_loop_out \
+        --while sensor_compressor --bucket 1d
 
 Read-only. It opens the database in read-only mode, so it can run while the
 recorder is still writing and cannot damage what it reads.
@@ -78,6 +79,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--minus",
         help="report --sensor minus this sensor, pairing readings taken together",
+    )
+    parser.add_argument(
+        "--while",
+        dest="while_asserted",
+        metavar="STATE_SENSOR",
+        help="keep only the moments this state sensor read 1, for example a compressor call",
     )
     parser.add_argument(
         "--tolerance",
@@ -164,6 +171,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("error: --minus needs --sensor; a delta has two ends", file=sys.stderr)
         return EXIT_USAGE
 
+    if arguments.while_asserted and not arguments.sensor:
+        print("error: --while needs --sensor; coverage is never gated", file=sys.stderr)
+        return EXIT_USAGE
+
     try:
         connection = open_readonly(arguments.database)
     except ReportingError as error:
@@ -177,6 +188,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 arguments.sensor,
                 minus=arguments.minus,
                 interval=interval,
+                while_asserted=arguments.while_asserted,
                 tolerance=tolerance,
                 start=start,
                 end=end,
@@ -188,12 +200,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 connection,
                 arguments.sensor,
                 minus=arguments.minus,
+                while_asserted=arguments.while_asserted,
                 tolerance=tolerance,
                 start=start,
                 end=end,
             )
         if arguments.sensor:
-            return _report_sensor(connection, arguments.sensor, start, end)
+            return _report_sensor(
+                connection,
+                arguments.sensor,
+                start,
+                end,
+                while_asserted=arguments.while_asserted,
+                tolerance=tolerance,
+            )
         return _report_coverage(connection)
     except ReportingError as error:
         print(f"error: {error}", file=sys.stderr)
@@ -225,18 +245,33 @@ def _report_sensor(
     sensor_id: str,
     start: datetime | None,
     end: datetime | None,
+    *,
+    while_asserted: str | None = None,
+    tolerance: timedelta = DEFAULT_PAIRING_TOLERANCE,
 ) -> int:
-    summary = summarize(connection, sensor_id, start=start, end=end)
+    summary = summarize(
+        connection,
+        sensor_id,
+        while_asserted=while_asserted,
+        tolerance=tolerance,
+        start=start,
+        end=end,
+    )
     if summary is None:
-        print(f"no measurements for {sensor_id} in that window")
+        qualifier = f" while {while_asserted} was asserted" if while_asserted else ""
+        print(f"no measurements for {sensor_id}{qualifier} in that window")
         return EXIT_NO_DATA
 
     print(f"sensor : {summary.sensor_id}")
+    if while_asserted:
+        print(f"while  : {while_asserted} asserted")
     print(f"unit   : {summary.unit}")
     print(f"count  : {summary.count:,}")
     print(f"min    : {summary.minimum:g}")
     print(f"max    : {summary.maximum:g}")
     print(f"mean   : {summary.mean:g}")
+    if summary.excluded:
+        print(f"\nexcluded: {summary.excluded:,} readings taken while it was not asserted")
 
     if summary.unit == "state":
         ratio = duty_cycle(connection, sensor_id, start=start, end=end)
@@ -252,24 +287,36 @@ def _report_delta(
     sensor_id: str,
     *,
     minus: str,
+    while_asserted: str | None,
     tolerance: timedelta,
     start: datetime | None,
     end: datetime | None,
 ) -> int:
     summary = delta(
-        connection, sensor_id, minus=minus, tolerance=tolerance, start=start, end=end
+        connection,
+        sensor_id,
+        minus=minus,
+        while_asserted=while_asserted,
+        tolerance=tolerance,
+        start=start,
+        end=end,
     )
     if summary is None:
-        print(f"no paired readings of {sensor_id} and {minus} in that window")
+        qualifier = f" while {while_asserted} was asserted" if while_asserted else ""
+        print(f"no paired readings of {sensor_id} and {minus}{qualifier} in that window")
         return EXIT_NO_DATA
 
     print(f"delta  : {summary.sensor_id} minus {summary.minus}")
+    if while_asserted:
+        print(f"while  : {while_asserted} asserted")
     print(f"unit   : {summary.unit}")
     print(f"pairs  : {summary.count:,}")
     print(f"min    : {summary.minimum:g}")
     print(f"max    : {summary.maximum:g}")
     print(f"mean   : {summary.mean:g}")
 
+    if summary.excluded:
+        print(f"\nexcluded: {summary.excluded:,} pairs taken while it was not asserted")
     if summary.unpaired or summary.unpaired_minus:
         print(
             f"\nunpaired: {summary.unpaired:,} of {summary.sensor_id}, "
@@ -286,6 +333,7 @@ def _report_buckets(
     *,
     minus: str | None,
     interval: timedelta,
+    while_asserted: str | None,
     tolerance: timedelta,
     start: datetime | None,
     end: datetime | None,
@@ -298,6 +346,7 @@ def _report_buckets(
             sensor_id,
             minus=minus,
             interval=interval,
+            while_asserted=while_asserted,
             tolerance=tolerance,
             start=start,
             end=end,
@@ -305,12 +354,20 @@ def _report_buckets(
         )
     else:
         buckets = bucketed(
-            connection, sensor_id, interval=interval, start=start, end=end, local=local
+            connection,
+            sensor_id,
+            interval=interval,
+            while_asserted=while_asserted,
+            tolerance=tolerance,
+            start=start,
+            end=end,
+            local=local,
         )
 
     if not buckets:
         subject = f"{sensor_id} and {minus}" if minus else sensor_id
-        print(f"no measurements for {subject} in that window")
+        qualifier = f" while {while_asserted} was asserted" if while_asserted else ""
+        print(f"no measurements for {subject}{qualifier} in that window")
         return EXIT_NO_DATA
 
     if as_csv:

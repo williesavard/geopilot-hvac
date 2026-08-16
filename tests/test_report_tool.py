@@ -436,6 +436,207 @@ def test_comparing_incompatible_sensors_is_a_usage_error(
     assert "not recorded in the same unit" in capsys.readouterr().err
 
 
+def gated_database(tmp_path: Path, *, running: tuple[bool, ...]) -> Path:
+    """Delta of 3.0 while running, 0.1 while idle, with a compressor state sensor."""
+
+    database = tmp_path / "gated.sqlite3"
+    with SqliteMeasurementHistorian(database) as historian:
+        for index, is_running in enumerate(running):
+            moment = START + timedelta(minutes=index)
+            spread = 3.0 if is_running else 0.1
+            rows = (
+                ("sensor_loop_in", 2.0, "degC", 0),
+                ("sensor_loop_out", 2.0 - spread, "degC", 3),
+                ("sensor_compressor", 1 if is_running else 0, "state", 6),
+            )
+            for sensor_id, value, unit, lag in rows:
+                stamped = moment + timedelta(seconds=lag)
+                historian.append(
+                    Measurement(
+                        id=f"source_bus:{sensor_id}:{index}",
+                        sensor_id=sensor_id,
+                        observed_at=stamped,
+                        received_at=stamped,
+                        value=value,
+                        unit=unit,
+                        quality=DataQuality.GOOD,
+                        source_id="source_bus",
+                    )
+                )
+    return database
+
+
+def test_a_gated_delta_reports_the_running_value(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = gated_database(tmp_path, running=(True, True, False, False))
+
+    exit_code = main(
+        [
+            "--database",
+            str(database),
+            "--sensor",
+            "sensor_loop_in",
+            "--minus",
+            "sensor_loop_out",
+            "--while",
+            "sensor_compressor",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == EXIT_OK
+    assert "while  : sensor_compressor asserted" in output
+    assert "pairs  : 2" in output
+    assert "mean   : 3" in output
+    assert "excluded: 2 pairs taken while it was not asserted" in output
+
+
+def test_an_ungated_delta_over_the_same_data_is_diluted(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The comparison that makes the gate worth having."""
+
+    database = gated_database(tmp_path, running=(True, True, False, False))
+
+    main(
+        [
+            "--database",
+            str(database),
+            "--sensor",
+            "sensor_loop_in",
+            "--minus",
+            "sensor_loop_out",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert "mean   : 1.55" in output
+    assert "excluded" not in output
+
+
+def test_a_gated_summary_reports_what_it_dropped(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = gated_database(tmp_path, running=(True, False, False))
+
+    exit_code = main(
+        [
+            "--database",
+            str(database),
+            "--sensor",
+            "sensor_loop_out",
+            "--while",
+            "sensor_compressor",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == EXIT_OK
+    assert "count  : 1" in output
+    assert "excluded: 2 readings taken while it was not asserted" in output
+
+
+def test_a_gated_bucket_reports_the_running_delta(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = gated_database(tmp_path, running=(True, False, True, False))
+
+    exit_code = main(
+        [
+            "--database",
+            str(database),
+            "--sensor",
+            "sensor_loop_in",
+            "--minus",
+            "sensor_loop_out",
+            "--while",
+            "sensor_compressor",
+            "--bucket",
+            "1h",
+            "--utc",
+            "--csv",
+        ]
+    )
+
+    lines = capsys.readouterr().out.splitlines()
+    assert exit_code == EXIT_OK
+    assert lines[1] == "2026-01-01T00:00:00+00:00,2,3.0,3.0,3.0"
+
+
+def test_a_gate_that_never_asserts_reports_no_data(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = gated_database(tmp_path, running=(False, False))
+
+    exit_code = main(
+        [
+            "--database",
+            str(database),
+            "--sensor",
+            "sensor_loop_in",
+            "--minus",
+            "sensor_loop_out",
+            "--while",
+            "sensor_compressor",
+        ]
+    )
+
+    assert exit_code == EXIT_NO_DATA
+    assert "while sensor_compressor was asserted" in capsys.readouterr().out
+
+
+def test_gating_on_a_non_state_sensor_is_a_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = gated_database(tmp_path, running=(True,))
+
+    exit_code = main(
+        [
+            "--database",
+            str(database),
+            "--sensor",
+            "sensor_loop_in",
+            "--while",
+            "sensor_loop_out",
+        ]
+    )
+
+    assert exit_code == EXIT_USAGE
+    assert "not state" in capsys.readouterr().err
+
+
+def test_a_misspelled_gate_is_a_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A typo must not read as an installation that never ran."""
+
+    database = gated_database(tmp_path, running=(True,))
+
+    exit_code = main(
+        [
+            "--database",
+            str(database),
+            "--sensor",
+            "sensor_loop_in",
+            "--while",
+            "sensor_compresor",
+        ]
+    )
+
+    assert exit_code == EXIT_USAGE
+    assert "no observations at all" in capsys.readouterr().err
+
+
+def test_gating_without_a_sensor_is_a_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = gated_database(tmp_path, running=(True,))
+
+    assert main(["--database", str(database), "--while", "sensor_compressor"]) == EXIT_USAGE
+    assert "--while needs --sensor" in capsys.readouterr().err
+
+
 def test_intervals_are_parsed_from_their_unit() -> None:
     assert parse_interval("30s") == timedelta(seconds=30)
     assert parse_interval("15m") == timedelta(minutes=15)
