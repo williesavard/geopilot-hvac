@@ -221,20 +221,21 @@ def coverage(connection: sqlite3.Connection) -> tuple[SensorCoverage, ...]:
     """
 
     sensors = connection.execute(
-        "SELECT sensor_id, unit, COUNT(*), MIN(observed_at_us), MAX(observed_at_us) "
-        "FROM measurements GROUP BY sensor_id, unit ORDER BY sensor_id"
+        "SELECT sensor_id, unit, COUNT(*) FROM measurements "
+        "GROUP BY sensor_id, unit ORDER BY sensor_id"
     ).fetchall()
 
     reports: list[SensorCoverage] = []
-    for sensor_id, unit, count, first_us, last_us in sensors:
+    for sensor_id, unit, count in sensors:
+        first, last, largest_gap = _edges_and_gap(connection, str(sensor_id))
         reports.append(
             SensorCoverage(
                 sensor_id=str(sensor_id),
                 unit=str(unit),
                 count=int(count),
-                first_observed_at=_from_microseconds(int(first_us)),
-                last_observed_at=_from_microseconds(int(last_us)),
-                largest_gap=_largest_gap(connection, str(sensor_id)),
+                first_observed_at=_at_offset(*first),
+                last_observed_at=_at_offset(*last),
+                largest_gap=largest_gap,
             )
         )
     return tuple(reports)
@@ -1157,20 +1158,37 @@ def _require_single_unit(
         )
 
 
-def _largest_gap(connection: sqlite3.Connection, sensor_id: str) -> timedelta:
-    rows = connection.execute(
-        "SELECT observed_at_us FROM measurements WHERE sensor_id = ? ORDER BY observed_at_us",
+def _edges_and_gap(
+    connection: sqlite3.Connection, sensor_id: str
+) -> tuple[tuple[int, int], tuple[int, int], timedelta]:
+    """Find a sensor's first and last observations and its widest hole, in one pass.
+
+    The edges come back with the UTC offset that was stored beside them, so the
+    dates a reader sees are the ones their own clock showed.
+    """
+
+    cursor = connection.execute(
+        "SELECT observed_at_us, observed_at_offset_s FROM measurements "
+        "WHERE sensor_id = ? ORDER BY observed_at_us",
         (sensor_id,),
-    ).fetchall()
+    )
 
     largest = 0
-    previous: int | None = None
-    for (value,) in rows:
-        current = int(value)
-        if previous is not None:
-            largest = max(largest, current - previous)
+    first: tuple[int, int] | None = None
+    previous: tuple[int, int] | None = None
+
+    for microseconds, offset_seconds in cursor:
+        current = (int(microseconds), int(offset_seconds))
+        if first is None:
+            first = current
+        elif previous is not None:
+            largest = max(largest, current[0] - previous[0])
         previous = current
-    return timedelta(microseconds=largest)
+
+    if first is None or previous is None:
+        raise ReportingError(f"{sensor_id} vanished between two queries")
+
+    return first, previous, timedelta(microseconds=largest)
 
 
 def _append_window(

@@ -32,8 +32,8 @@ modbus = [
 ]
 
 [project.urls]
-Repository = "https://github.com/williesavard/GeoPilot"
-Issues = "https://github.com/williesavard/GeoPilot/issues"
+Repository = "https://github.com/williesavard/geopilot-hvac"
+Issues = "https://github.com/williesavard/geopilot-hvac/issues"
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers --strict-config"
@@ -42,6 +42,9 @@ pythonpath = ["backend/src"]
 
 [tool.setuptools.packages.find]
 where = ["backend/src"]
+
+[tool.setuptools.package-data]
+geopilot = ["assets/*.css", "assets/*.js"]
 
 [tool.ruff]
 line-length = 100

@@ -63,6 +63,9 @@ For a `state` sensor the mean **is** the duty cycle over that interval, since
 the values are 0 and 1. `--bucket 1d` on a zone call is a day-by-day picture of
 how hard that zone was working.
 
+For a page you can look at instead of a table you have to read, see
+[Dashboard](DASHBOARD.md) — same numbers, same refusals, one HTML file.
+
 ## Runs: how long, and how often
 
 A duty cycle says the compressor ran 46.5% of the time. It **cannot tell 22 long
