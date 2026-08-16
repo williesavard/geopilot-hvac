@@ -1,0 +1,252 @@
+/* GeoPilot dashboard.
+ *
+ * Inlined into the generated page, because the page has to survive being
+ * emailed to somebody. Kept in its own file so it can be edited as CSS.
+ */
+
+:root {
+  color-scheme: light dark;
+
+  --ink: #16191d;
+  --ink-soft: #5a6270;
+  --ink-faint: #8b93a1;
+  --paper: #f7f8fa;
+  --card: #ffffff;
+  --rule: #e2e6ec;
+
+  --good: #2f855a;
+  --warn: #b7791f;
+  --bad: #c53030;
+  --line: #2b6cb0;
+  --band: rgba(43, 108, 176, 0.16);
+  --line-alt: #805ad5;
+
+  --radius: 10px;
+  --gap: 1.25rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #e8ebf0;
+    --ink-soft: #a6afbd;
+    --ink-faint: #737d8c;
+    --paper: #14171b;
+    --card: #1c2027;
+    --rule: #2b313a;
+
+    --good: #68d391;
+    --warn: #f6c56b;
+    --bad: #fc8181;
+    --line: #63b3ed;
+    --band: rgba(99, 179, 237, 0.18);
+    --line-alt: #b794f4;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 2rem 1.25rem 4rem;
+  background: var(--paper);
+  color: var(--ink);
+  font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+main {
+  max-width: 1080px;
+  margin: 0 auto;
+}
+
+h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.6rem;
+  letter-spacing: -0.01em;
+}
+
+h2 {
+  margin: 2.5rem 0 0.35rem;
+  font-size: 1.1rem;
+  letter-spacing: -0.005em;
+}
+
+h3 {
+  margin: 0 0 0.15rem;
+  font-size: 0.95rem;
+}
+
+p {
+  margin: 0.35rem 0;
+}
+
+.subtitle,
+.note {
+  color: var(--ink-soft);
+  font-size: 0.86rem;
+}
+
+.note {
+  margin-top: 0.5rem;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  padding: 1rem 1.15rem;
+  margin-top: var(--gap);
+}
+
+.grid {
+  display: grid;
+  gap: var(--gap);
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+}
+
+.scroll {
+  overflow-x: auto;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.9rem;
+}
+
+th,
+td {
+  text-align: right;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--rule);
+  white-space: nowrap;
+}
+
+th:first-child,
+td:first-child {
+  text-align: left;
+}
+
+thead th {
+  color: var(--ink-soft);
+  font-weight: 600;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.status {
+  display: inline-block;
+  width: 0.62rem;
+  height: 0.62rem;
+  border-radius: 50%;
+  margin-right: 0.45rem;
+  vertical-align: baseline;
+}
+
+.status.good {
+  background: var(--good);
+}
+
+.status.warn {
+  background: var(--warn);
+}
+
+.status.bad {
+  background: var(--bad);
+}
+
+.figure {
+  margin-top: 0.75rem;
+}
+
+svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.axis text {
+  fill: var(--ink-faint);
+  font-size: 10px;
+}
+
+.axis line {
+  stroke: var(--rule);
+  stroke-width: 1;
+}
+
+.band {
+  fill: var(--band);
+}
+
+.line {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 1.75;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.bar {
+  fill: var(--line-alt);
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.75rem 0 0.25rem;
+}
+
+button {
+  font: inherit;
+  font-size: 0.82rem;
+  padding: 0.28rem 0.7rem;
+  border-radius: 999px;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+
+button[aria-pressed="true"] {
+  border-color: var(--line);
+  color: var(--line);
+  font-weight: 600;
+}
+
+.readout {
+  min-height: 1.3rem;
+  color: var(--ink-soft);
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.caveat {
+  border-left: 3px solid var(--warn);
+  padding-left: 0.8rem;
+  color: var(--ink-soft);
+  font-size: 0.86rem;
+  margin-top: 1rem;
+}
+
+footer {
+  margin-top: 3rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--rule);
+  color: var(--ink-faint);
+  font-size: 0.8rem;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.86em;
+}
