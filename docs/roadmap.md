@@ -79,6 +79,7 @@ rules and first tested code path.
 - `docs/DISCRETE_STATE_ADR.md`
 - `docs/MEASUREMENT_ID_ADR.md`
 - `docs/MODBUS_SMOKE_TOOL.md`
+- `docs/REPORTING.md`
 - `docs/hardware.md`
 - `docs/hardware/README.md`
 - repository governance files

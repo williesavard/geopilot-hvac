@@ -159,12 +159,15 @@ journalctl -u geopilot-poll.service --since "1 hour ago"
 And check that measurements are actually landing:
 
 ```bash
-sudo -u geopilot sqlite3 /var/lib/geopilot/geopilot.sqlite3 \
-    "SELECT COUNT(*), MAX(observed_at_us) FROM measurements"
+sudo -u geopilot python3 tools/geopilot_report.py \
+    --database /var/lib/geopilot/geopilot.sqlite3
 ```
 
 A count that stops rising is the failure that matters, and no alert will tell
-you. Check it deliberately during the first week.
+you. Check it deliberately during the first week. The report opens the database
+read-only and is safe to run while recording continues; its `largest gap` column
+is what reveals an outage that a healthy-looking total would hide. See
+[Reporting](REPORTING.md).
 
 ## Time matters more than usual
 
