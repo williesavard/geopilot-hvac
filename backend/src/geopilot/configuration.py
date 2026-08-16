@@ -24,7 +24,7 @@ from geopilot.domain import (
     SensorMeasurementKind,
     SystemType,
 )
-from geopilot.modbus_transport import ModbusRegisterKind
+from geopilot.modbus_transport import ModbusBitKind, ModbusRegisterKind
 from geopilot.onewire import DEFAULT_SYSFS_ROOT
 from geopilot.register_decoder import RegisterDataType
 
@@ -70,6 +70,26 @@ class OneWireReadConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class BitReadConfig:
+    """One discrete input or coil, and the sensor its state belongs to.
+
+    `inverted` exists because active-low wiring exists. A stored `1` must always
+    mean asserted, so an inverted signal is corrected here, before ingestion,
+    rather than leaving every consumer to ask whether this particular 1 meant
+    yes. See ``docs/DISCRETE_STATE_ADR.md``.
+    """
+
+    read_id: str
+    source_id: str
+    sensor_id: str
+    unit_id: int
+    bit_kind: ModbusBitKind
+    address: int
+    inverted: bool
+    source_reference: str
+
+
+@dataclass(frozen=True, slots=True)
 class RegisterReadConfig:
     """One register to read, and the sensor its value belongs to."""
 
@@ -101,6 +121,7 @@ class InstallationConfig:
     reads: tuple[RegisterReadConfig, ...]
     onewire_sources: tuple[OneWireSourceConfig, ...] = ()
     onewire_reads: tuple[OneWireReadConfig, ...] = ()
+    bit_reads: tuple[BitReadConfig, ...] = ()
 
     def source(self, source_id: str) -> SerialSourceConfig:
         """Return one source by id."""
@@ -252,6 +273,21 @@ def parse_configuration(
     )
     _require_unique(tuple(item.read_id for item in onewire_reads), "onewire read id")
 
+    bit_reads = tuple(
+        BitReadConfig(
+            read_id=_require_text(entry, "id"),
+            source_id=_require_text(entry, "source_id"),
+            sensor_id=_require_text(entry, "sensor_id"),
+            unit_id=_require_int(entry, "unit_id", minimum=0),
+            bit_kind=_require_enum(entry, "bit", ModbusBitKind),
+            address=_require_int(entry, "address", minimum=0),
+            inverted=_optional_bool(entry, "inverted", False),
+            source_reference=_require_text(entry, "source_reference"),
+        )
+        for entry in _require_array(document, "bit_read")
+    )
+    _require_unique(tuple(item.read_id for item in bit_reads), "bit read id")
+
     _validate_references(
         systems,
         equipment,
@@ -262,6 +298,7 @@ def parse_configuration(
         extra_source_ids=frozenset(item.source_id for item in onewire_sources),
     )
     _validate_onewire_references(sensors, sources, onewire_sources, onewire_reads)
+    _validate_bit_references(sensors, sources, bit_reads)
 
     return InstallationConfig(
         version=version,
@@ -274,7 +311,27 @@ def parse_configuration(
         reads=reads,
         onewire_sources=onewire_sources,
         onewire_reads=onewire_reads,
+        bit_reads=bit_reads,
     )
+
+
+def _validate_bit_references(
+    sensors: tuple[Sensor, ...],
+    sources: tuple[SerialSourceConfig, ...],
+    bit_reads: tuple[BitReadConfig, ...],
+) -> None:
+    sensor_ids = {item.id for item in sensors}
+    serial_ids = {item.source_id for item in sources}
+
+    for read in bit_reads:
+        if read.source_id not in serial_ids:
+            raise ConfigurationError(
+                f"bit read {read.read_id} references unknown source: {read.source_id}"
+            )
+        if read.sensor_id not in sensor_ids:
+            raise ConfigurationError(
+                f"bit read {read.read_id} references unknown sensor: {read.sensor_id}"
+            )
 
 
 def _validate_onewire_references(
@@ -410,6 +467,15 @@ def _require_enum(table: dict[str, Any], key: str, enum_type: Any) -> Any:
     except ValueError as error:
         allowed = ", ".join(sorted(item.value for item in enum_type))
         raise ConfigurationError(f"{key} must be one of: {allowed}") from error
+
+
+def _optional_bool(table: dict[str, Any], key: str, default: bool) -> bool:
+    if key not in table:
+        return default
+    value = table.get(key)
+    if not isinstance(value, bool):
+        raise ConfigurationError(f"{key} must be a boolean")
+    return value
 
 
 def _optional_enum(table: dict[str, Any], key: str, enum_type: Any) -> Any | None:
