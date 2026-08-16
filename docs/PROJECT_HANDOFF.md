@@ -35,8 +35,11 @@ These rules should guide every future task:
 - Local-first.
 - Homeowner owns the data.
 - Works without Internet for critical local visibility.
-- Read-only MVP.
-- No active HVAC control in the MVP.
+- Read-only acquisition. Acquisition never writes.
+- Control is tiered and opt-in; see `docs/CONTROL_BOUNDARY_ADR.md`. Writing
+  to the heat pump's own controller stays permanently forbidden.
+- Fail-safe is a wiring property: a de-energised relay must leave the
+  building behaving as it did before GeoPilot existed.
 - No AI in the MVP.
 - No geothermal optimization logic yet.
 - No mandatory cloud service.
@@ -547,6 +550,8 @@ Core docs:
 - `docs/ACQUISITION_RUNTIME.md`
 - `docs/ONEWIRE_ADAPTER.md`
 - `docs/DEPLOYMENT.md`
+- `docs/CONTROL_BOUNDARY_ADR.md`
+- `docs/MODBUS_WRITE_BOUNDARY.md`
 - `docs/MODBUS_SMOKE_TOOL.md`
 - `docs/MODBUS_RTU_SIMULATOR_PORT.md`
 - `docs/REAL_MODBUS_READINESS_REVIEW.md`
