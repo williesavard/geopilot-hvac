@@ -68,9 +68,14 @@ the timer follows when it declines to fire missed cycles on boot.
 **It does not update.** The page is a snapshot of the moment it was generated.
 Regenerate it; it costs a second and it never lies about being live.
 
-**It is not a control surface.** Nothing on it writes anything, and the database
-is opened read-only, so a bug in the renderer cannot damage the recording it is
-describing.
+**The file writes nothing.** The database is opened read-only, so a bug in the
+renderer cannot damage the recording it is describing.
+
+**The file cannot control anything, and does not pretend to.** With no server
+there is no back channel, so the control section is not rendered at all rather
+than rendered inert — a button that cannot work is worse than no button. To
+operate relays, serve the same page with `tools/geopilot_control.py`; see
+[Control Surface](CONTROL_SURFACE_ADR.md).
 
 ## Times
 

@@ -306,3 +306,85 @@ def test_an_installation_without_bit_reads_still_parses() -> None:
     config = parse_configuration(document(), created_at=STAMP)
 
     assert config.bit_reads == ()
+
+
+def document_with_control() -> dict[str, Any]:
+    payload = document()
+    payload["control"] = {"enabled": True}
+    payload["control_target"] = [
+        {
+            "id": "target_zone_1",
+            "source_id": "source_bus",
+            "unit_id": 2,
+            "address": 16,
+            "minimum_interval_seconds": 60,
+            "description": "zone 1 damper",
+        }
+    ]
+    return payload
+
+
+def test_control_targets_are_parsed() -> None:
+    config = parse_configuration(document_with_control(), created_at=STAMP)
+
+    assert config.control.enabled is True
+    target = config.control.targets[0]
+    assert target.target_id == "target_zone_1"
+    assert target.address == 16
+    assert target.minimum_interval_seconds == 60
+    assert config.control_source("target_zone_1") == "source_bus"
+
+
+def test_control_is_disabled_when_the_configuration_says_nothing() -> None:
+    """A file that never mentions control grants none."""
+
+    config = parse_configuration(document(), created_at=STAMP)
+
+    assert config.control.enabled is False
+    assert config.control.targets == ()
+
+
+def test_targets_can_be_declared_without_enabling_control() -> None:
+    """The intended first run: everything wired and listed, nothing permitted."""
+
+    payload = document_with_control()
+    payload["control"] = {"enabled": False}
+
+    config = parse_configuration(payload, created_at=STAMP)
+
+    assert config.control.enabled is False
+    assert len(config.control.targets) == 1
+
+
+def test_a_target_without_a_stated_interval_gets_the_conservative_one() -> None:
+    payload = document_with_control()
+    del payload["control_target"][0]["minimum_interval_seconds"]
+
+    config = parse_configuration(payload, created_at=STAMP)
+
+    assert config.control.targets[0].minimum_interval_seconds == 300.0
+
+
+def test_a_target_on_an_unknown_bus_is_refused() -> None:
+    """Discovering this when somebody presses the button is the worst moment."""
+
+    payload = document_with_control()
+    payload["control_target"][0]["source_id"] = "source_absent"
+
+    with pytest.raises(ConfigurationError, match="unknown source"):
+        parse_configuration(payload, created_at=STAMP)
+
+
+def test_duplicate_control_targets_are_refused() -> None:
+    payload = document_with_control()
+    payload["control_target"].append(dict(payload["control_target"][0]))
+
+    with pytest.raises(ConfigurationError, match="duplicate control target"):
+        parse_configuration(payload, created_at=STAMP)
+
+
+def test_an_unknown_control_target_cannot_be_resolved_to_a_bus() -> None:
+    config = parse_configuration(document_with_control(), created_at=STAMP)
+
+    with pytest.raises(ConfigurationError, match="unknown control target"):
+        config.control_source("target_absent")

@@ -258,3 +258,23 @@ def test_a_missing_interval_is_absent_from_the_series(tmp_path: Path) -> None:
     assert isinstance(panels, dict)
     series = panels["sensor:sensor_loop_in"]["views"]["day"]
     assert len(series) == 2
+
+
+def test_the_static_page_has_no_controls_at_all(tmp_path: Path) -> None:
+    """Not hidden — absent. A file has no back channel, so a button would lie."""
+
+    page = render(recorded(tmp_path))
+
+    assert "<h2>Control</h2>" not in page
+    assert 'id="control"' not in page
+    assert "controlToken" in page  # present as null, so the script can tell
+    assert "/api/command" not in page
+
+
+def test_the_served_page_carries_the_controls_and_the_token(tmp_path: Path) -> None:
+    page = render(recorded(tmp_path), control_token="a-token")
+
+    assert "<h2>Control</h2>" in page
+    assert 'id="control"' in page
+    assert "a-token" in page
+    assert "/api/command" in page

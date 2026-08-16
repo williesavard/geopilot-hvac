@@ -81,6 +81,7 @@ rules and first tested code path.
 - `docs/MODBUS_SMOKE_TOOL.md`
 - `docs/REPORTING.md`
 - `docs/DASHBOARD.md`
+- `docs/CONTROL_SURFACE_ADR.md`
 - `docs/hardware.md`
 - `docs/hardware/README.md`
 - repository governance files
