@@ -22,6 +22,7 @@ from geopilot_report import (  # noqa: E402
     EXIT_OK,
     EXIT_USAGE,
     build_parser,
+    describe_gate,
     format_duration,
     main,
     parse_interval,
@@ -489,7 +490,7 @@ def test_a_gated_delta_reports_the_running_value(
     assert "while  : sensor_compressor asserted" in output
     assert "pairs  : 2" in output
     assert "mean   : 3" in output
-    assert "excluded: 2 pairs taken while it was not asserted" in output
+    assert "excluded: 2 pairs taken outside that condition" in output
 
 
 def test_an_ungated_delta_over_the_same_data_is_diluted(
@@ -534,7 +535,7 @@ def test_a_gated_summary_reports_what_it_dropped(
     output = capsys.readouterr().out
     assert exit_code == EXIT_OK
     assert "count  : 1" in output
-    assert "excluded: 2 readings taken while it was not asserted" in output
+    assert "excluded: 2 readings taken outside that condition" in output
 
 
 def test_a_gated_bucket_reports_the_running_delta(
@@ -583,7 +584,7 @@ def test_a_gate_that_never_asserts_reports_no_data(
     )
 
     assert exit_code == EXIT_NO_DATA
-    assert "while sensor_compressor was asserted" in capsys.readouterr().out
+    assert "while sensor_compressor asserted" in capsys.readouterr().out
 
 
 def test_gating_on_a_non_state_sensor_is_a_usage_error(
@@ -635,6 +636,84 @@ def test_gating_without_a_sensor_is_a_usage_error(
 
     assert main(["--database", str(database), "--while", "sensor_compressor"]) == EXIT_USAGE
     assert "--while needs --sensor" in capsys.readouterr().err
+
+
+def test_the_inverse_gate_reports_the_recovering_value(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = gated_database(tmp_path, running=(True, True, False, False))
+
+    exit_code = main(
+        [
+            "--database",
+            str(database),
+            "--sensor",
+            "sensor_loop_in",
+            "--minus",
+            "sensor_loop_out",
+            "--while-not",
+            "sensor_compressor",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == EXIT_OK
+    assert "while  : sensor_compressor not asserted" in output
+    assert "pairs  : 2" in output
+    assert "mean   : 0.1" in output
+
+
+def test_the_two_senses_cannot_be_asked_for_at_once(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """argparse rejects the pair before any query runs."""
+
+    database = gated_database(tmp_path, running=(True,))
+
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "--database",
+                str(database),
+                "--sensor",
+                "sensor_loop_in",
+                "--while",
+                "sensor_compressor",
+                "--while-not",
+                "sensor_compressor",
+            ]
+        )
+
+    assert "not allowed with" in capsys.readouterr().err
+
+
+def test_the_reported_sense_is_never_ambiguous(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A bare sensor name beside a number would not say which side it describes."""
+
+    database = gated_database(tmp_path, running=(False, False))
+
+    main(
+        [
+            "--database",
+            str(database),
+            "--sensor",
+            "sensor_loop_in",
+            "--minus",
+            "sensor_loop_out",
+            "--while",
+            "sensor_compressor",
+        ]
+    )
+
+    assert "while sensor_compressor asserted" in capsys.readouterr().out
+
+
+def test_the_gate_description_carries_its_sense() -> None:
+    assert describe_gate("sensor_compressor", None) == "sensor_compressor asserted"
+    assert describe_gate(None, "sensor_compressor") == "sensor_compressor not asserted"
+    assert describe_gate(None, None) == ""
 
 
 def test_intervals_are_parsed_from_their_unit() -> None:

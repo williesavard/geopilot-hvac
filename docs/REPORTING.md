@@ -152,6 +152,37 @@ at the same time as it was pulled down by a weaker delta. The two cancelled.
 loop temperature *while the compressor was running*, rather than an average
 diluted by every hour it was not.
 
+### The other side: what happens while it is off
+
+`--while-not` keeps the opposite moments. Same four days, same database:
+
+```bash
+python3 tools/geopilot_report.py --database geopilot.sqlite3 \
+    --sensor sensor_loop_in --minus sensor_loop_out \
+    --while-not sensor_compressor --bucket 1d
+```
+
+```text
+starts at                    count        min        max       mean
+2026-01-12T00:00:00-05:00      168        0.1      0.148     0.1239
+2026-01-13T00:00:00-05:00      144      0.148      0.196     0.1719
+2026-01-14T00:00:00-05:00      120      0.196      0.244     0.2199
+2026-01-15T00:00:00-05:00       96      0.244      0.292     0.2679
+```
+
+Two independent series, from one recording. Under load the delta shrinks; at
+rest the residual delta grows and the idle `count` falls — less time off, and
+less settled when it gets there. Either series alone can be argued with. The
+pair is harder to dismiss.
+
+The two senses **partition** the data: every observation the gate can speak for
+lands in exactly one of them, and the counts add up to the ungated total.
+
+`--while` and `--while-not` are separate flags rather than one flag with an
+invert switch, and they are mutually exclusive. The sense is printed beside
+every result, because a bare sensor name next to a number does not say which
+side of it you are looking at.
+
 ### What the gate is allowed to assume
 
 The state sensor is sampled on the same cycle as everything else, so its
@@ -163,7 +194,14 @@ is matched to the nearest state reading within `--tolerance`, and:
   anything, because the gate contributes no value — it only answers yes or no.
   This is the opposite of the delta pairing, deliberately;
 - **it will not reach past the tolerance.** Beyond that the signal is
-  unobserved, and an unobserved state is not an asserted one.
+  unobserved, and **an unobserved state admits nothing, in either direction.**
+
+That last rule matters most for `--while-not`. It would be easy, and wrong, to
+read "no state reading here" as "it was off" — which would silently count every
+hole in the state record as idle time, and the holes are exactly where you know
+least. So a gap admits nothing to either side, and the counts show it: when the
+two senses do not add up to the ungated total, the difference is unobserved
+state, not a rounding artefact.
 
 Only a sensor recorded in the `state` unit can be a gate. Naming a temperature
 is refused, and so is naming a sensor with no observations at all — a typo must
@@ -272,9 +310,14 @@ rows, which is how you notice.
 **It compares two sensors, not three.** A delta has exactly two ends. A third
 sensor can only ever be a `state` gate, never another term.
 
-**It conditions on one gate, and only on assertion.** There is no way to ask for
-"while zone 1 called *and* the outdoor temperature was below −10", nor for
-"while the compressor was *off*". Both are ordinary extensions; neither is here.
+**It conditions on one gate.** Either sense of one state sensor, and no more.
+There is no way to ask for "while zone 1 called *and* the outdoor temperature
+was below −10", nor to combine two state sensors.
+
+**A gated result says nothing about duration.** "The delta while idle" is not
+"how long it took to recover"; a gate selects moments, it does not measure the
+stretch they belong to. Reading recovery *time* out of these numbers would need
+run-length analysis of the state series, which is not here.
 
 **Its largest gap and its pairing are computed in Python** rather than in SQL.
 The pairing streams both series and holds two rows at a time, so it does not
@@ -311,3 +354,8 @@ filtered, excluded counts kept separate from unpaired ones, a state reading
 being reused where a delta partner would have been consumed, the gate refusing
 to reach past its tolerance, and the three refusals — a non-state sensor, an
 unknown sensor, and a sensor absent from the window.
+
+For the inverse sense: both gates over one dataset giving 3.0 and 0.1, the two
+senses partitioning the pairs so their counts add to the ungated total, an
+unobserved state admitting nothing to *either* side, both senses at once being
+refused, and the same three validations applying to the inverse gate.

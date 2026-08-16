@@ -19,6 +19,11 @@ Answers the questions a recording exists to answer, without a dashboard.
         --sensor sensor_loop_in --minus sensor_loop_out \
         --while sensor_compressor --bucket 1d
 
+    # the same, but only while it was off: the loop settling back
+    python3 tools/geopilot_report.py --database db.sqlite3 \
+        --sensor sensor_loop_in --minus sensor_loop_out \
+        --while-not sensor_compressor --bucket 1d
+
 Read-only. It opens the database in read-only mode, so it can run while the
 recorder is still writing and cannot damage what it reads.
 """
@@ -80,11 +85,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--minus",
         help="report --sensor minus this sensor, pairing readings taken together",
     )
-    parser.add_argument(
+    sense = parser.add_mutually_exclusive_group()
+    sense.add_argument(
         "--while",
         dest="while_asserted",
         metavar="STATE_SENSOR",
         help="keep only the moments this state sensor read 1, for example a compressor call",
+    )
+    sense.add_argument(
+        "--while-not",
+        dest="while_not_asserted",
+        metavar="STATE_SENSOR",
+        help="keep only the moments this state sensor read 0, for example a loop recovering",
     )
     parser.add_argument(
         "--tolerance",
@@ -132,6 +144,25 @@ def parse_moment(value: str | None, label: str) -> datetime | None:
     return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
 
 
+def describe_gate(while_asserted: str | None, while_not_asserted: str | None) -> str:
+    """Name the gate in words, or return an empty string when there is none.
+
+    The sense has to appear everywhere the gate does. A reader who sees only
+    "sensor_compressor" beside a number has no way to tell whether they are
+    looking at the loop working or the loop recovering.
+    """
+
+    if while_asserted:
+        return f"{while_asserted} asserted"
+    if while_not_asserted:
+        return f"{while_not_asserted} not asserted"
+    return ""
+
+
+def _during(gate: str) -> str:
+    return f" while {gate}" if gate else ""
+
+
 def format_duration(span: timedelta) -> str:
     """Render a duration in units a human reads without arithmetic."""
 
@@ -171,7 +202,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("error: --minus needs --sensor; a delta has two ends", file=sys.stderr)
         return EXIT_USAGE
 
-    if arguments.while_asserted and not arguments.sensor:
+    gate = describe_gate(arguments.while_asserted, arguments.while_not_asserted)
+    if gate and not arguments.sensor:
         print("error: --while needs --sensor; coverage is never gated", file=sys.stderr)
         return EXIT_USAGE
 
@@ -189,6 +221,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 minus=arguments.minus,
                 interval=interval,
                 while_asserted=arguments.while_asserted,
+                while_not_asserted=arguments.while_not_asserted,
+                gate=gate,
                 tolerance=tolerance,
                 start=start,
                 end=end,
@@ -201,6 +235,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 arguments.sensor,
                 minus=arguments.minus,
                 while_asserted=arguments.while_asserted,
+                while_not_asserted=arguments.while_not_asserted,
+                gate=gate,
                 tolerance=tolerance,
                 start=start,
                 end=end,
@@ -212,6 +248,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 start,
                 end,
                 while_asserted=arguments.while_asserted,
+                while_not_asserted=arguments.while_not_asserted,
+                gate=gate,
                 tolerance=tolerance,
             )
         return _report_coverage(connection)
@@ -247,31 +285,33 @@ def _report_sensor(
     end: datetime | None,
     *,
     while_asserted: str | None = None,
+    while_not_asserted: str | None = None,
+    gate: str = "",
     tolerance: timedelta = DEFAULT_PAIRING_TOLERANCE,
 ) -> int:
     summary = summarize(
         connection,
         sensor_id,
         while_asserted=while_asserted,
+        while_not_asserted=while_not_asserted,
         tolerance=tolerance,
         start=start,
         end=end,
     )
     if summary is None:
-        qualifier = f" while {while_asserted} was asserted" if while_asserted else ""
-        print(f"no measurements for {sensor_id}{qualifier} in that window")
+        print(f"no measurements for {sensor_id}{_during(gate)} in that window")
         return EXIT_NO_DATA
 
     print(f"sensor : {summary.sensor_id}")
-    if while_asserted:
-        print(f"while  : {while_asserted} asserted")
+    if gate:
+        print(f"while  : {gate}")
     print(f"unit   : {summary.unit}")
     print(f"count  : {summary.count:,}")
     print(f"min    : {summary.minimum:g}")
     print(f"max    : {summary.maximum:g}")
     print(f"mean   : {summary.mean:g}")
     if summary.excluded:
-        print(f"\nexcluded: {summary.excluded:,} readings taken while it was not asserted")
+        print(f"\nexcluded: {summary.excluded:,} readings taken outside that condition")
 
     if summary.unit == "state":
         ratio = duty_cycle(connection, sensor_id, start=start, end=end)
@@ -288,6 +328,8 @@ def _report_delta(
     *,
     minus: str,
     while_asserted: str | None,
+    while_not_asserted: str | None,
+    gate: str,
     tolerance: timedelta,
     start: datetime | None,
     end: datetime | None,
@@ -297,18 +339,18 @@ def _report_delta(
         sensor_id,
         minus=minus,
         while_asserted=while_asserted,
+        while_not_asserted=while_not_asserted,
         tolerance=tolerance,
         start=start,
         end=end,
     )
     if summary is None:
-        qualifier = f" while {while_asserted} was asserted" if while_asserted else ""
-        print(f"no paired readings of {sensor_id} and {minus}{qualifier} in that window")
+        print(f"no paired readings of {sensor_id} and {minus}{_during(gate)} in that window")
         return EXIT_NO_DATA
 
     print(f"delta  : {summary.sensor_id} minus {summary.minus}")
-    if while_asserted:
-        print(f"while  : {while_asserted} asserted")
+    if gate:
+        print(f"while  : {gate}")
     print(f"unit   : {summary.unit}")
     print(f"pairs  : {summary.count:,}")
     print(f"min    : {summary.minimum:g}")
@@ -316,7 +358,7 @@ def _report_delta(
     print(f"mean   : {summary.mean:g}")
 
     if summary.excluded:
-        print(f"\nexcluded: {summary.excluded:,} pairs taken while it was not asserted")
+        print(f"\nexcluded: {summary.excluded:,} pairs taken outside that condition")
     if summary.unpaired or summary.unpaired_minus:
         print(
             f"\nunpaired: {summary.unpaired:,} of {summary.sensor_id}, "
@@ -334,6 +376,8 @@ def _report_buckets(
     minus: str | None,
     interval: timedelta,
     while_asserted: str | None,
+    while_not_asserted: str | None,
+    gate: str,
     tolerance: timedelta,
     start: datetime | None,
     end: datetime | None,
@@ -347,6 +391,7 @@ def _report_buckets(
             minus=minus,
             interval=interval,
             while_asserted=while_asserted,
+            while_not_asserted=while_not_asserted,
             tolerance=tolerance,
             start=start,
             end=end,
@@ -358,6 +403,7 @@ def _report_buckets(
             sensor_id,
             interval=interval,
             while_asserted=while_asserted,
+            while_not_asserted=while_not_asserted,
             tolerance=tolerance,
             start=start,
             end=end,
@@ -366,8 +412,7 @@ def _report_buckets(
 
     if not buckets:
         subject = f"{sensor_id} and {minus}" if minus else sensor_id
-        qualifier = f" while {while_asserted} was asserted" if while_asserted else ""
-        print(f"no measurements for {subject}{qualifier} in that window")
+        print(f"no measurements for {subject}{_during(gate)} in that window")
         return EXIT_NO_DATA
 
     if as_csv:
