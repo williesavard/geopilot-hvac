@@ -21,12 +21,14 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 from geopilot.domain import epoch_microseconds
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_MICROSECOND = timedelta(microseconds=1)
+_DAY_MICROSECONDS = 86_400_000_000
 
 
 class ReportingError(RuntimeError):
@@ -47,6 +49,21 @@ class SensorCoverage:
     @property
     def span(self) -> timedelta:
         return self.last_observed_at - self.first_observed_at
+
+
+@dataclass(frozen=True, slots=True)
+class Bucket:
+    """One interval of aggregated history.
+
+    `starts_at` is the beginning of the interval, not the first sample in it. A
+    bucket that holds a single reading taken at 14:47 still starts at 14:00.
+    """
+
+    starts_at: datetime
+    count: int
+    minimum: float
+    maximum: float
+    mean: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,25 +131,23 @@ def summarize(
     quietly would be worse than refusing.
     """
 
+
     clauses = ["sensor_id = ?"]
     parameters: list[object] = [sensor_id]
     _append_window(clauses, parameters, start, end)
     where = " AND ".join(clauses)
 
+    _require_single_unit(connection, sensor_id, where, parameters)
+
     row = connection.execute(
-        "SELECT unit, COUNT(*), MIN(value), MAX(value), AVG(value), COUNT(DISTINCT unit) "
+        "SELECT unit, COUNT(*), MIN(value), MAX(value), AVG(value) "
         f"FROM measurements WHERE {where}",
         tuple(parameters),
     ).fetchone()
 
-    unit, count, minimum, maximum, mean, distinct_units = row
+    unit, count, minimum, maximum, mean = row
     if not count:
         return None
-    if distinct_units > 1:
-        raise ReportingError(
-            f"{sensor_id} was recorded in {distinct_units} different units over that "
-            "window; summarize a narrower window instead"
-        )
 
     return SensorSummary(
         sensor_id=sensor_id,
@@ -141,6 +156,72 @@ def summarize(
         minimum=float(minimum),
         maximum=float(maximum),
         mean=float(mean),
+    )
+
+
+def bucketed(
+    connection: sqlite3.Connection,
+    sensor_id: str,
+    *,
+    interval: timedelta,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    local: bool = True,
+) -> tuple[Bucket, ...]:
+    """Aggregate one sensor into fixed intervals, oldest first.
+
+    This is the shape a curve is plotted from: an hourly loop temperature over a
+    winter, or a daily one over a year.
+
+    **A bucket with no samples does not appear.** Nothing is synthesized to fill
+    it, for the same reason the timer does not fire missed cycles on boot: a gap
+    in the data is honest, and an invented point is not. An absent bucket is the
+    outage, and a plot that leaves a hole is telling the truth.
+
+    For a `state` sensor the mean **is** the duty cycle over that interval, since
+    the values are 0 and 1.
+
+    `local` aligns buckets to the wall clock at the place the readings were
+    taken, using the UTC offset stored with each measurement. A daily bucket is
+    then a local calendar day rather than a day running from 19:00 to 19:00,
+    which is the difference between a heating day and two half-evenings. Pass
+    `local=False` for UTC alignment.
+    """
+
+    bucket_microseconds = _bucket_microseconds(interval)
+
+    clauses = ["sensor_id = ?"]
+    parameters: list[object] = [sensor_id]
+    _append_window(clauses, parameters, start, end)
+    where = " AND ".join(clauses)
+
+    _require_single_unit(connection, sensor_id, where, parameters)
+
+    instant = (
+        "(observed_at_us + observed_at_offset_s * 1000000)" if local else "observed_at_us"
+    )
+    _require_post_epoch(connection, where, parameters, instant)
+
+    rows = connection.execute(
+        f"SELECT {instant} / {bucket_microseconds} AS bucket_index, "
+        "COUNT(*), MIN(value), MAX(value), AVG(value), MIN(observed_at_offset_s) "
+        f"FROM measurements WHERE {where} "
+        "GROUP BY bucket_index ORDER BY bucket_index",
+        tuple(parameters),
+    ).fetchall()
+
+    return tuple(
+        Bucket(
+            starts_at=_bucket_start(
+                int(index) * bucket_microseconds,
+                offset_seconds=int(offset_seconds) if local else 0,
+            ),
+            count=int(count),
+            minimum=float(minimum),
+            maximum=float(maximum),
+            mean=float(mean),
+        )
+        for index, count, minimum, maximum, mean, offset_seconds in rows
     )
 
 
@@ -171,6 +252,85 @@ def duty_cycle(
     if not count:
         return None
     return float(asserted) / float(count)
+
+
+def _bucket_microseconds(interval: timedelta) -> int:
+    """Validate an interval and return it in microseconds.
+
+    An interval must either divide evenly into a day or be a whole number of
+    days. That is what guarantees a bucket boundary lands on a wall-clock
+    boundary: 15 minutes, an hour and six hours all do, a week does, and seven
+    hours does not. Refusing seven hours costs nothing and prevents a chart whose
+    buckets drift a little further from midnight every day.
+    """
+
+    microseconds = interval // _MICROSECOND
+    if microseconds <= 0:
+        raise ReportingError(f"a bucket interval must be positive, received {interval}")
+    if _DAY_MICROSECONDS % microseconds and microseconds % _DAY_MICROSECONDS:
+        raise ReportingError(
+            f"a bucket interval of {interval} neither divides evenly into a day nor is "
+            "a whole number of days, so its boundaries would drift away from midnight"
+        )
+    return microseconds
+
+
+def _bucket_start(microseconds: int, *, offset_seconds: int) -> datetime:
+    """Turn a bucket index back into the aware instant the interval starts at."""
+
+    zone = timezone(timedelta(seconds=offset_seconds))
+    return (_EPOCH + timedelta(microseconds=microseconds - offset_seconds * 1_000_000)).astimezone(
+        zone
+    )
+
+
+def _require_post_epoch(
+    connection: sqlite3.Connection,
+    where: str,
+    parameters: list[object],
+    instant: str,
+) -> None:
+    """Refuse to bucket observations stamped before 1970.
+
+    SQLite's integer division truncates toward zero, so a negative instant lands
+    in the wrong bucket and the interval straddling the epoch comes out double
+    width. Rather than carry that arithmetic, this refuses the input.
+
+    It is not hypothetical. A Raspberry Pi with no real-time clock and no network
+    boots stamping observations at the epoch, and with a western offset those
+    become negative once aligned to local time. A report that refuses is more
+    useful than one that quietly misplaces them, and the clock is the real
+    problem either way.
+    """
+
+    (earliest,) = connection.execute(
+        f"SELECT MIN({instant}) FROM measurements WHERE {where}",
+        tuple(parameters),
+    ).fetchone()
+
+    if earliest is not None and earliest < 0:
+        raise ReportingError(
+            "that window contains observations stamped before 1970, which cannot be "
+            "bucketed; the recording host's clock was almost certainly unset"
+        )
+
+
+def _require_single_unit(
+    connection: sqlite3.Connection,
+    sensor_id: str,
+    where: str,
+    parameters: list[object],
+) -> None:
+    (distinct_units,) = connection.execute(
+        f"SELECT COUNT(DISTINCT unit) FROM measurements WHERE {where}",
+        tuple(parameters),
+    ).fetchone()
+
+    if distinct_units > 1:
+        raise ReportingError(
+            f"{sensor_id} was recorded in {distinct_units} different units over that "
+            "window; report on a narrower window instead"
+        )
 
 
 def _largest_gap(connection: sqlite3.Connection, sensor_id: str) -> timedelta:

@@ -10,6 +10,10 @@ Answers the questions a recording exists to answer, without a dashboard.
     python3 tools/geopilot_report.py --database db.sqlite3 \
         --sensor sensor_loop_in --since 2026-01-01
 
+    # the curve: hourly averages, as CSV for plotting
+    python3 tools/geopilot_report.py --database db.sqlite3 \
+        --sensor sensor_loop_in --bucket 1h --csv > loop.csv
+
 Read-only. It opens the database in read-only mode, so it can run while the
 recorder is still writing and cannot damage what it reads.
 """
@@ -17,6 +21,7 @@ recorder is still writing and cannot damage what it reads.
 from __future__ import annotations
 
 import argparse
+import csv
 import sqlite3
 import sys
 from collections.abc import Sequence
@@ -24,6 +29,7 @@ from datetime import UTC, datetime, timedelta
 
 from geopilot.reporting import (
     ReportingError,
+    bucketed,
     coverage,
     duty_cycle,
     open_readonly,
@@ -33,6 +39,13 @@ from geopilot.reporting import (
 EXIT_OK = 0
 EXIT_USAGE = 1
 EXIT_NO_DATA = 2
+
+INTERVAL_UNITS = {
+    "s": timedelta(seconds=1),
+    "m": timedelta(minutes=1),
+    "h": timedelta(hours=1),
+    "d": timedelta(days=1),
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,7 +59,40 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sensor", help="summarize one sensor instead of reporting coverage")
     parser.add_argument("--since", help="window start, ISO 8601, for example 2026-01-01")
     parser.add_argument("--until", help="window end, ISO 8601, exclusive")
+    parser.add_argument(
+        "--bucket",
+        help="aggregate into intervals, for example 15m, 1h or 1d; requires --sensor",
+    )
+    parser.add_argument(
+        "--utc",
+        action="store_true",
+        help="align buckets to UTC instead of the wall clock where readings were taken",
+    )
+    parser.add_argument(
+        "--csv",
+        action="store_true",
+        help="write buckets as CSV, for plotting; ignored without --bucket",
+    )
     return parser
+
+
+def parse_interval(value: str) -> timedelta:
+    """Parse a bucket interval such as `15m`, `1h` or `1d`.
+
+    A bare number is refused. `--bucket 60` could mean a minute or an hour, and
+    guessing wrong would silently produce a chart at the wrong resolution.
+    """
+
+    suffix = value[-1:]
+    if suffix not in INTERVAL_UNITS:
+        raise ValueError(
+            f"--bucket needs a unit, one of {', '.join(sorted(INTERVAL_UNITS))}: {value}"
+        )
+    try:
+        quantity = int(value[:-1])
+    except ValueError as error:
+        raise ValueError(f"--bucket is not a whole number of {suffix}: {value}") from error
+    return quantity * INTERVAL_UNITS[suffix]
 
 
 def parse_moment(value: str | None, label: str) -> datetime | None:
@@ -82,8 +128,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         start = parse_moment(arguments.since, "--since")
         end = parse_moment(arguments.until, "--until")
+        interval = parse_interval(arguments.bucket) if arguments.bucket else None
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
+        return EXIT_USAGE
+
+    if interval is not None and not arguments.sensor:
+        print("error: --bucket needs --sensor; buckets are per sensor", file=sys.stderr)
         return EXIT_USAGE
 
     try:
@@ -93,6 +144,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_USAGE
 
     try:
+        if interval is not None:
+            return _report_buckets(
+                connection,
+                arguments.sensor,
+                interval=interval,
+                start=start,
+                end=end,
+                local=not arguments.utc,
+                as_csv=arguments.csv,
+            )
         if arguments.sensor:
             return _report_sensor(connection, arguments.sensor, start, end)
         return _report_coverage(connection)
@@ -145,6 +206,48 @@ def _report_sensor(
             print(f"asserted in {ratio * 100:.1f}% of samples")
             print("(a ratio of samples, not of time; even sampling makes them equal)")
 
+    return EXIT_OK
+
+
+def _report_buckets(
+    connection: sqlite3.Connection,
+    sensor_id: str,
+    *,
+    interval: timedelta,
+    start: datetime | None,
+    end: datetime | None,
+    local: bool,
+    as_csv: bool,
+) -> int:
+    buckets = bucketed(
+        connection, sensor_id, interval=interval, start=start, end=end, local=local
+    )
+    if not buckets:
+        print(f"no measurements for {sensor_id} in that window")
+        return EXIT_NO_DATA
+
+    if as_csv:
+        writer = csv.writer(sys.stdout)
+        writer.writerow(("starts_at", "count", "min", "max", "mean"))
+        for bucket in buckets:
+            writer.writerow(
+                (
+                    bucket.starts_at.isoformat(),
+                    bucket.count,
+                    bucket.minimum,
+                    bucket.maximum,
+                    bucket.mean,
+                )
+            )
+        return EXIT_OK
+
+    print(f"{'starts at':26s} {'count':>7s} {'min':>10s} {'max':>10s} {'mean':>10s}")
+    for bucket in buckets:
+        print(
+            f"{bucket.starts_at.isoformat():26s} {bucket.count:>7,} "
+            f"{bucket.minimum:>10g} {bucket.maximum:>10g} {bucket.mean:>10.4g}"
+        )
+    print(f"\n{len(buckets):,} intervals; an absent interval is a gap, not a zero")
     return EXIT_OK
 
 

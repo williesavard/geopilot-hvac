@@ -24,6 +24,7 @@ from geopilot_report import (  # noqa: E402
     build_parser,
     format_duration,
     main,
+    parse_interval,
     parse_moment,
 )
 
@@ -177,6 +178,99 @@ def test_an_explicit_offset_is_preserved() -> None:
 
     assert moment is not None
     assert moment.utcoffset() == timedelta(hours=-5)
+
+
+def test_buckets_are_printed_as_a_table(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = database_with(tmp_path, values=(10.0, 20.0, 30.0))
+
+    exit_code = main(
+        ["--database", str(database), "--sensor", "sensor_loop_in", "--bucket", "1h", "--utc"]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == EXIT_OK
+    assert "2026-01-01T00:00:00+00:00" in output
+    assert "an absent interval is a gap, not a zero" in output
+
+
+def test_buckets_can_be_written_as_csv(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = database_with(tmp_path, values=(10.0, 20.0, 30.0))
+
+    exit_code = main(
+        [
+            "--database",
+            str(database),
+            "--sensor",
+            "sensor_loop_in",
+            "--bucket",
+            "1h",
+            "--utc",
+            "--csv",
+        ]
+    )
+
+    lines = capsys.readouterr().out.splitlines()
+    assert exit_code == EXIT_OK
+    assert lines[0] == "starts_at,count,min,max,mean"
+    assert lines[1] == "2026-01-01T00:00:00+00:00,3,10.0,30.0,20.0"
+
+
+def test_bucketing_without_a_sensor_is_a_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = database_with(tmp_path)
+
+    assert main(["--database", str(database), "--bucket", "1h"]) == EXIT_USAGE
+    assert "--bucket needs --sensor" in capsys.readouterr().err
+
+
+def test_an_unusable_interval_is_a_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = database_with(tmp_path)
+
+    exit_code = main(
+        ["--database", str(database), "--sensor", "sensor_loop_in", "--bucket", "7h"]
+    )
+
+    assert exit_code == EXIT_USAGE
+    assert "drift" in capsys.readouterr().err
+
+
+def test_bucketing_an_unknown_sensor_reports_no_data(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = database_with(tmp_path)
+
+    exit_code = main(
+        ["--database", str(database), "--sensor", "sensor_absent", "--bucket", "1h"]
+    )
+
+    assert exit_code == EXIT_NO_DATA
+    assert "no measurements for sensor_absent" in capsys.readouterr().out
+
+
+def test_intervals_are_parsed_from_their_unit() -> None:
+    assert parse_interval("30s") == timedelta(seconds=30)
+    assert parse_interval("15m") == timedelta(minutes=15)
+    assert parse_interval("6h") == timedelta(hours=6)
+    assert parse_interval("7d") == timedelta(days=7)
+
+
+def test_a_bare_number_is_refused_rather_than_guessed() -> None:
+    """`--bucket 60` could mean a minute or an hour. Guessing would be silent."""
+
+    with pytest.raises(ValueError, match="needs a unit"):
+        parse_interval("60")
+
+
+def test_a_non_numeric_interval_is_refused() -> None:
+    with pytest.raises(ValueError, match="whole number"):
+        parse_interval("1.5h")
 
 
 def test_the_database_argument_is_required() -> None:
