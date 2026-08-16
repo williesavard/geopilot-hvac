@@ -15,7 +15,7 @@ from geopilot.configuration import (
     parse_configuration,
 )
 from geopilot.domain import EquipmentType, MeasurementKind, SensorMeasurementKind, SystemType
-from geopilot.modbus_transport import ModbusRegisterKind
+from geopilot.modbus_transport import ModbusBitKind, ModbusRegisterKind
 from geopilot.register_decoder import RegisterDataType
 
 STAMP = datetime(2026, 8, 11, tzinfo=UTC)
@@ -207,3 +207,102 @@ def test_shipped_example_keeps_its_comments() -> None:
     # It must still parse.
     with EXAMPLE.open("rb") as handle:
         tomllib.load(handle)
+
+
+def document_with_bits() -> dict[str, Any]:
+    payload = document()
+    payload["sensor"].append(
+        {
+            "id": "sensor_zone_1_call",
+            "equipment_id": "equipment_hp",
+            "name": "Zone 1 call",
+            "measurement_kind": "state",
+            "sensor_kind": "state",
+            "unit": "state",
+            "source_id": "source_bus",
+        }
+    )
+    payload["bit_read"] = [
+        {
+            "id": "read_zone_1",
+            "source_id": "source_bus",
+            "sensor_id": "sensor_zone_1_call",
+            "unit_id": 2,
+            "bit": "discrete_input",
+            "address": 0,
+            "source_reference": "relay panel mapping, 2026-08-16",
+        }
+    ]
+    return payload
+
+
+def test_bit_reads_are_parsed() -> None:
+    config = parse_configuration(document_with_bits(), created_at=STAMP)
+
+    read = config.bit_reads[0]
+    assert read.bit_kind is ModbusBitKind.DISCRETE_INPUT
+    assert read.unit_id == 2
+    assert read.source_reference.startswith("relay panel")
+
+
+def test_inversion_defaults_to_false() -> None:
+    """A stored 1 means asserted, so inversion must be opted into."""
+
+    config = parse_configuration(document_with_bits(), created_at=STAMP)
+
+    assert config.bit_reads[0].inverted is False
+
+
+def test_inversion_can_be_declared() -> None:
+    payload = document_with_bits()
+    payload["bit_read"][0]["inverted"] = True
+
+    config = parse_configuration(payload, created_at=STAMP)
+
+    assert config.bit_reads[0].inverted is True
+
+
+def test_inversion_must_be_a_boolean() -> None:
+    payload = document_with_bits()
+    payload["bit_read"][0]["inverted"] = "yes"
+
+    with pytest.raises(ConfigurationError, match="inverted"):
+        parse_configuration(payload, created_at=STAMP)
+
+
+def test_a_bit_read_requires_a_source_reference() -> None:
+    payload = document_with_bits()
+    del payload["bit_read"][0]["source_reference"]
+
+    with pytest.raises(ConfigurationError, match="source_reference"):
+        parse_configuration(payload, created_at=STAMP)
+
+
+def test_a_bit_read_referencing_an_unknown_sensor_is_rejected() -> None:
+    payload = document_with_bits()
+    payload["bit_read"][0]["sensor_id"] = "missing"
+
+    with pytest.raises(ConfigurationError, match="unknown sensor"):
+        parse_configuration(payload, created_at=STAMP)
+
+
+def test_a_bit_read_referencing_an_unknown_source_is_rejected() -> None:
+    payload = document_with_bits()
+    payload["bit_read"][0]["source_id"] = "missing"
+
+    with pytest.raises(ConfigurationError, match="unknown source"):
+        parse_configuration(payload, created_at=STAMP)
+
+
+def test_duplicate_bit_read_ids_are_rejected() -> None:
+    payload = document_with_bits()
+    payload["bit_read"].append(dict(payload["bit_read"][0]))
+
+    with pytest.raises(ConfigurationError, match="duplicate bit read id"):
+        parse_configuration(payload, created_at=STAMP)
+
+
+def test_an_installation_without_bit_reads_still_parses() -> None:
+    config = parse_configuration(document(), created_at=STAMP)
+
+    assert config.bit_reads == ()
