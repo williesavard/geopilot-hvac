@@ -40,6 +40,29 @@ python3 tools/geopilot_report.py --database geopilot.sqlite3 \
 
 A `state` sensor also reports its duty cycle.
 
+```bash
+# the curve: daily averages, aligned to the local wall clock
+python3 tools/geopilot_report.py --database geopilot.sqlite3 \
+    --sensor sensor_loop_in --bucket 1d
+```
+
+```text
+starts at                    count        min        max       mean
+2026-01-12T00:00:00-05:00      288      0.221       3.51       1.91
+2026-01-13T00:00:00-05:00      288      0.041       3.33       1.73
+2026-01-14T00:00:00-05:00      168     -0.139       3.15       1.74
+2026-01-15T00:00:00-05:00      288     -0.319       2.97       1.37
+```
+
+Add `--csv` to redirect that into a file and plot it. Intervals take a unit —
+`15m`, `1h`, `6h`, `1d`, `7d`. A bare `--bucket 60` is refused, because it could
+mean a minute or an hour and guessing wrong would silently produce a chart at
+the wrong resolution.
+
+For a `state` sensor the mean **is** the duty cycle over that interval, since
+the values are 0 and 1. `--bucket 1d` on a zone call is a day-by-day picture of
+how hard that zone was working.
+
 | Exit code | Meaning |
 | --- | --- |
 | 0 | a report was produced |
@@ -48,6 +71,50 @@ A `state` sensor also reports its duty cycle.
 
 Exit 2 exists so a cron job can distinguish "the recorder is empty" from "the
 command was wrong". They call for different responses.
+
+## Buckets are aligned to the local wall clock
+
+By default a bucket boundary falls where the clock says it does *at the place
+the readings were taken*, using the UTC offset stored with every measurement.
+
+This is not cosmetic. In Quebec, a "day" aligned to UTC runs from 19:00 to 19:00
+and splits every evening in half — so a daily heating average would mix the cold
+end of one night with the warm end of the next. The same eight readings, taken
+between 22:00 and 05:00 local, land in two days locally and in one day under
+UTC. The local answer is the true one.
+
+Because each measurement carries the offset that was in effect *when it was
+taken*, this stays right across a daylight-saving change: a spring day simply
+holds 23 hours of samples and a fall day 25. The one blemish is the label. A
+bucket that spans the transition is labelled with the standard-time offset,
+which is an hour off for two buckets a year. Pass `--utc` to align to UTC
+instead.
+
+An interval must divide evenly into a day or be a whole number of days. Fifteen
+minutes, six hours and a week all qualify; seven hours does not, and is refused
+rather than producing buckets that creep further from midnight every day.
+
+Observations stamped before 1970 are refused outright. SQLite truncates integer
+division toward zero, so a negative instant lands in the wrong bucket and the
+interval straddling the epoch comes out double width. This is not a hypothetical
+concern: a Raspberry Pi with no real-time clock and no network stamps its first
+readings at the epoch, and with a western offset those go negative as soon as
+they are aligned to local time. Refusing them says something true; bucketing
+them would not.
+
+## What a bucket does not tell you
+
+**An absent bucket is a gap.** Nothing is synthesized to fill it, for the same
+reason the timer does not fire missed cycles on boot: a gap in the data is
+honest, and an invented point is not. A plot with a hole in it is telling the
+truth.
+
+**A present bucket can still be incomplete**, and this one bites. In the table
+above, 14 January holds 168 samples where the others hold 288 — a ten-hour
+outage. The mean is still printed, and it is a mean over the fourteen hours that
+survived, weighted toward whatever time of day those were. **Read the count
+column before trusting a mean.** A day missing its coldest hours will look
+warmer, and nothing in the number itself says so.
 
 ## Two deliberate departures
 
@@ -78,14 +145,17 @@ silently smoothed — a corrected number would hide the uneven sampling, which i
 itself a fault worth seeing.
 
 **It refuses mixed units.** If a sensor was recorded in `degC` and later in
-`degF`, `summarize` raises rather than averaging them. A mean of 20 and 68 is a
-number with no meaning. Coverage still lists both, as separate rows, which is
-how you notice.
+`degF`, both `summarize` and `bucketed` raise rather than averaging them. A mean
+of 20 and 68 is a number with no meaning. Coverage still lists both, as separate
+rows, which is how you notice.
 
-**It has no time buckets.** Hourly and daily aggregates — the shape you would
-actually plot — are the obvious next step and are not here yet. The largest gap
-is computed in Python over the sensor's timestamps rather than in SQL, which is
-fine for a year of one-minute samples and would not be for a decade of them.
+**It does not compare sensors.** Every aggregate covers one sensor. Loop-in
+against loop-out — the delta that actually says something about the ground field
+— is a join, and it is not here.
+
+**Its largest gap is computed in Python** over the sensor's timestamps rather
+than in SQL. That is fine for a year of one-minute samples and would not be for
+a decade of them.
 
 ## Testing
 
@@ -98,3 +168,9 @@ being created, gap detection across a three-day hole, half-open windows, empty
 windows reporting nothing rather than zero, mixed-unit refusal, duty cycle
 including the zero case, and a report produced against a database that is still
 being written.
+
+For buckets: aggregation and ordering, a bucket starting at its interval rather
+than at its first sample, an empty interval staying absent, a state bucket's
+mean equalling its duty cycle, interval validation in both directions, and the
+local-versus-UTC pair — the same eight evening readings falling into two local
+days and one UTC day, which is the case that justifies the default.

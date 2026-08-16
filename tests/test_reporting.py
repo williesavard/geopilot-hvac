@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import closing
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 from geopilot.domain import DataQuality, Measurement
 from geopilot.reporting import (
     ReportingError,
+    bucketed,
     coverage,
     duty_cycle,
     open_readonly,
@@ -284,6 +285,232 @@ def test_duty_cycle_honours_the_window(tmp_path: Path) -> None:
     )
 
     assert duty_cycle(connection, "sensor_zone_1", start=START + timedelta(minutes=1)) == 0.0
+
+
+def test_buckets_aggregate_each_interval(tmp_path: Path) -> None:
+    connection = recorded(
+        tmp_path,
+        [measurement(index=index, value=float(index)) for index in range(120)],
+    )
+
+    buckets = bucketed(connection, "sensor_loop_in", interval=timedelta(hours=1))
+
+    assert len(buckets) == 2
+    assert buckets[0].count == 60
+    assert (buckets[0].minimum, buckets[0].maximum, buckets[0].mean) == (0.0, 59.0, 29.5)
+    assert buckets[1].mean == 89.5
+
+
+def test_a_bucket_starts_at_the_interval_not_the_first_sample(tmp_path: Path) -> None:
+    """A bucket holding one reading taken at 14:47 still starts at 14:00."""
+
+    connection = recorded(
+        tmp_path,
+        [measurement(index=0, observed_at=START + timedelta(hours=14, minutes=47))],
+    )
+
+    bucket = bucketed(connection, "sensor_loop_in", interval=timedelta(hours=1), local=False)[0]
+
+    assert bucket.starts_at == START + timedelta(hours=14)
+
+
+def test_buckets_come_back_oldest_first(tmp_path: Path) -> None:
+    connection = recorded(
+        tmp_path,
+        [
+            measurement(index=0, observed_at=START + timedelta(days=2)),
+            measurement(index=1, observed_at=START),
+            measurement(index=2, observed_at=START + timedelta(days=1)),
+        ],
+    )
+
+    buckets = bucketed(connection, "sensor_loop_in", interval=timedelta(days=1), local=False)
+
+    assert [bucket.starts_at for bucket in buckets] == [
+        START,
+        START + timedelta(days=1),
+        START + timedelta(days=2),
+    ]
+
+
+def test_an_empty_interval_is_absent_rather_than_invented(tmp_path: Path) -> None:
+    """A gap in the data is honest. A synthesized point is not."""
+
+    connection = recorded(
+        tmp_path,
+        [
+            measurement(index=0, observed_at=START),
+            measurement(index=1, observed_at=START + timedelta(days=3)),
+        ],
+    )
+
+    buckets = bucketed(connection, "sensor_loop_in", interval=timedelta(days=1), local=False)
+
+    assert len(buckets) == 2
+    assert buckets[1].starts_at == START + timedelta(days=3)
+
+
+def test_a_state_bucket_mean_is_its_duty_cycle(tmp_path: Path) -> None:
+    connection = recorded(
+        tmp_path,
+        [
+            measurement(index=index, sensor_id="sensor_zone_1", unit="state", value=value)
+            for index, value in enumerate((1, 1, 1, 0))
+        ],
+    )
+
+    bucket = bucketed(connection, "sensor_zone_1", interval=timedelta(hours=1), local=False)[0]
+
+    assert bucket.mean == 0.75
+    assert bucket.mean == duty_cycle(connection, "sensor_zone_1")
+
+
+def test_local_buckets_follow_the_wall_clock_where_readings_were_taken(tmp_path: Path) -> None:
+    """A daily bucket must be a local day, not one running 19:00 to 19:00."""
+
+    eastern = timezone(timedelta(hours=-5))
+    evening = datetime(2026, 1, 15, 22, 0, tzinfo=eastern)
+    connection = recorded(
+        tmp_path,
+        [
+            measurement(index=index, observed_at=evening + timedelta(hours=index))
+            for index in range(8)
+        ],
+    )
+
+    buckets = bucketed(connection, "sensor_loop_in", interval=timedelta(days=1))
+
+    assert [bucket.starts_at.isoformat() for bucket in buckets] == [
+        "2026-01-15T00:00:00-05:00",
+        "2026-01-16T00:00:00-05:00",
+    ]
+    assert [bucket.count for bucket in buckets] == [2, 6]
+
+
+def test_utc_alignment_would_have_merged_those_two_days(tmp_path: Path) -> None:
+    """The same readings, aligned to UTC, become one day. That is the point."""
+
+    eastern = timezone(timedelta(hours=-5))
+    evening = datetime(2026, 1, 15, 22, 0, tzinfo=eastern)
+    connection = recorded(
+        tmp_path,
+        [
+            measurement(index=index, observed_at=evening + timedelta(hours=index))
+            for index in range(8)
+        ],
+    )
+
+    buckets = bucketed(connection, "sensor_loop_in", interval=timedelta(days=1), local=False)
+
+    assert len(buckets) == 1
+    assert buckets[0].count == 8
+
+
+def test_an_interval_that_drifts_from_midnight_is_refused(tmp_path: Path) -> None:
+    connection = recorded(tmp_path, [measurement(index=0)])
+
+    with pytest.raises(ReportingError, match="drift"):
+        bucketed(connection, "sensor_loop_in", interval=timedelta(hours=7))
+
+
+def test_a_whole_number_of_days_is_accepted(tmp_path: Path) -> None:
+    """A week does not divide into a day, but it does tile from midnight."""
+
+    connection = recorded(tmp_path, [measurement(index=0)])
+
+    assert len(bucketed(connection, "sensor_loop_in", interval=timedelta(days=7))) == 1
+
+
+def test_a_non_positive_interval_is_refused(tmp_path: Path) -> None:
+    connection = recorded(tmp_path, [measurement(index=0)])
+
+    for interval in (timedelta(0), timedelta(hours=-1)):
+        with pytest.raises(ReportingError, match="positive"):
+            bucketed(connection, "sensor_loop_in", interval=interval)
+
+
+def test_buckets_honour_the_window(tmp_path: Path) -> None:
+    connection = recorded(
+        tmp_path,
+        [measurement(index=index) for index in range(180)],
+    )
+
+    buckets = bucketed(
+        connection,
+        "sensor_loop_in",
+        interval=timedelta(hours=1),
+        start=START + timedelta(hours=1),
+        end=START + timedelta(hours=2),
+        local=False,
+    )
+
+    assert len(buckets) == 1
+    assert buckets[0].count == 60
+
+
+def test_buckets_cover_only_the_named_sensor(tmp_path: Path) -> None:
+    connection = recorded(
+        tmp_path,
+        [
+            measurement(index=0, sensor_id="sensor_loop_in", value=10.0),
+            measurement(index=1, sensor_id="sensor_loop_out", value=1000.0),
+        ],
+    )
+
+    bucket = bucketed(connection, "sensor_loop_in", interval=timedelta(hours=1), local=False)[0]
+
+    assert bucket.count == 1
+    assert bucket.maximum == 10.0
+
+
+def test_bucketing_an_empty_window_returns_nothing(tmp_path: Path) -> None:
+    connection = recorded(tmp_path, [measurement(index=0)])
+
+    assert bucketed(connection, "sensor_absent", interval=timedelta(hours=1)) == ()
+
+
+def test_bucketing_refuses_observations_stamped_before_the_epoch(tmp_path: Path) -> None:
+    """SQLite truncates division toward zero, so a negative instant misbuckets."""
+
+    connection = recorded(
+        tmp_path,
+        [measurement(index=0, observed_at=datetime(1969, 12, 31, 23, 0, tzinfo=UTC))],
+    )
+
+    with pytest.raises(ReportingError, match="before 1970"):
+        bucketed(connection, "sensor_loop_in", interval=timedelta(hours=1), local=False)
+
+
+def test_a_positive_stamp_can_still_go_negative_on_a_western_clock(tmp_path: Path) -> None:
+    """A Pi with no clock and no network stamps its first readings at the epoch.
+
+    23:00 on 1969-12-31 in Eastern time is 04:00 on 1970-01-01 in UTC. The UTC
+    instant is positive and buckets fine; the local one is negative and does not.
+    """
+
+    eastern = timezone(timedelta(hours=-5))
+    connection = recorded(
+        tmp_path,
+        [measurement(index=0, observed_at=datetime(1969, 12, 31, 23, 0, tzinfo=eastern))],
+    )
+
+    assert bucketed(connection, "sensor_loop_in", interval=timedelta(hours=1), local=False)
+
+    with pytest.raises(ReportingError, match="before 1970"):
+        bucketed(connection, "sensor_loop_in", interval=timedelta(hours=1))
+
+
+def test_bucketing_refuses_mixed_units(tmp_path: Path) -> None:
+    connection = recorded(
+        tmp_path,
+        [
+            measurement(index=0, value=20.0, unit="degC"),
+            measurement(index=1, value=68.0, unit="degF"),
+        ],
+    )
+
+    with pytest.raises(ReportingError, match="different units"):
+        bucketed(connection, "sensor_loop_in", interval=timedelta(hours=1))
 
 
 def test_a_report_can_be_produced_while_recording_continues(tmp_path: Path) -> None:
