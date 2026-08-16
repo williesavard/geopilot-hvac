@@ -69,10 +69,9 @@ would be exactly the improvisation this project forbids elsewhere for register
 addresses. So the transport stops at the boundary and the decision is left
 where it belongs.
 
-**This needs a domain decision before bits can be ingested**, most likely a new
-sensor kind and a canonical unit for discrete states, with pass-through
-normalization. That is a change to `domain.py` and `ingestion.py`, which is an
-ADR, not an adapter detail.
+The decision is proposed in [Discrete State ADR](DISCRETE_STATE_ADR.md): a
+`STATE` sensor kind, a canonical `state` unit, and values restricted to 0 or 1.
+Ingestion stays blocked until that ADR is accepted.
 
 ## Testing
 

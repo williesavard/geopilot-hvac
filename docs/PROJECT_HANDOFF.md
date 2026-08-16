@@ -554,6 +554,7 @@ Core docs:
 - `docs/MODBUS_WRITE_BOUNDARY.md`
 - `docs/COMMAND_GUARD.md`
 - `docs/MODBUS_BIT_BOUNDARY.md`
+- `docs/DISCRETE_STATE_ADR.md`
 - `docs/MODBUS_SMOKE_TOOL.md`
 - `docs/MODBUS_RTU_SIMULATOR_PORT.md`
 - `docs/REAL_MODBUS_READINESS_REVIEW.md`
