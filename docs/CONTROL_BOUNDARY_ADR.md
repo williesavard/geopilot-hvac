@@ -173,6 +173,6 @@ Accept when a reviewer confirms:
 
 1. `feature/modbus-write-transport` — `ModbusWriteTransport`, function code
    `0x05`, structured errors, fake transport, no runtime wiring.
-2. `feature/command-guard` — enablement, whitelist, rate limit, audit record.
+2. ~~`feature/command-guard`~~ — done; see `docs/COMMAND_GUARD.md`.
 3. Read zone call signals through Modbus digital inputs, still read-only.
 4. Revisit anticipatory control only after a heating season of data exists.

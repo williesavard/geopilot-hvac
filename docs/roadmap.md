@@ -74,6 +74,7 @@ rules and first tested code path.
 - `docs/DEPLOYMENT.md`
 - `docs/CONTROL_BOUNDARY_ADR.md`
 - `docs/MODBUS_WRITE_BOUNDARY.md`
+- `docs/COMMAND_GUARD.md`
 - `docs/MEASUREMENT_ID_ADR.md`
 - `docs/MODBUS_SMOKE_TOOL.md`
 - `docs/hardware.md`
