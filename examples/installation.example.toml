@@ -99,3 +99,29 @@ measurement_kind = "temperature"
 sensor_kind = "temperature"
 unit = "degC"
 source_id = "source_probes"
+
+# ---------------------------------------------------------------------------
+# Discrete inputs, for thermostat zone calls.
+#
+# A stored 1 always means the signal is asserted. If a contact closes when the
+# zone is NOT calling, set inverted = true here rather than reinterpreting the
+# value later. See docs/DISCRETE_STATE_ADR.md.
+
+[[sensor]]
+id = "sensor_zone_1_call"
+equipment_id = "equipment_heat_pump"
+name = "Zone 1 call"
+measurement_kind = "state"
+sensor_kind = "state"
+unit = "state"
+source_id = "source_bench_bus"
+
+[[bit_read]]
+id = "read_zone_1_call"
+source_id = "source_bench_bus"
+sensor_id = "sensor_zone_1_call"
+unit_id = 2
+bit = "discrete_input"
+address = 0
+inverted = false
+source_reference = "TBD - trace the Y1 wire and record which input it lands on"

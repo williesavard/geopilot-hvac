@@ -19,6 +19,7 @@ from types import TracebackType
 
 from geopilot.acquisition import (
     AcquisitionContext,
+    AcquisitionErrorCode,
     AcquisitionFailure,
     AcquisitionPipeline,
     AcquisitionResult,
@@ -31,14 +32,16 @@ from geopilot.acquisition_runner import (
     RequestExecutor,
 )
 from geopilot.configuration import (
+    BitReadConfig,
     InstallationConfig,
     OneWireReadConfig,
     OneWireSourceConfig,
     RegisterReadConfig,
     SerialSourceConfig,
 )
-from geopilot.ingestion import IngestionService, MeasurementNormalizer
+from geopilot.ingestion import STATE_UNIT, IngestionService, MeasurementNormalizer, RawMeasurement
 from geopilot.modbus_pyserial_transport import (
+    PySerialModbusBitTransport,
     PySerialModbusConfig,
     PySerialModbusTransport,
 )
@@ -46,7 +49,13 @@ from geopilot.modbus_simulator import (
     SimulatedModbusAcquisitionService,
     TransportBackedSimulatedModbusRegisterClient,
 )
-from geopilot.modbus_transport import ModbusReadRequest, ModbusTransport
+from geopilot.modbus_transport import (
+    ModbusBitReadRequest,
+    ModbusBitTransport,
+    ModbusReadRequest,
+    ModbusTransport,
+    ModbusTransportError,
+)
 from geopilot.onewire import (
     OneWireAcquisitionService,
     OneWireBus,
@@ -61,6 +70,7 @@ from geopilot.sqlite_historian import SqliteMeasurementHistorian
 Clock = Callable[[], datetime]
 TransportFactory = Callable[[SerialSourceConfig], ModbusTransport]
 OneWireBusFactory = Callable[[OneWireSourceConfig], OneWireBus]
+BitTransportFactory = Callable[[SerialSourceConfig], ModbusBitTransport]
 Sleeper = Callable[[float], None]
 
 
@@ -82,6 +92,34 @@ def open_serial_transport(source: SerialSourceConfig) -> ModbusTransport:
             bytesize=source.bytesize,
             timeout=source.timeout,
         )
+    )
+
+
+def open_bit_transport(source: SerialSourceConfig) -> ModbusBitTransport:
+    """Open a bit transport for a configured serial source."""
+
+    return PySerialModbusBitTransport(
+        PySerialModbusConfig(
+            port=source.port,
+            baudrate=source.baudrate,
+            parity=source.parity,
+            stopbits=source.stopbits,
+            bytesize=source.bytesize,
+            timeout=source.timeout,
+        )
+    )
+
+
+def build_bit_read_request(read: BitReadConfig) -> ModbusBitReadRequest:
+    """Convert one configured bit read into a transport request."""
+
+    return ModbusBitReadRequest(
+        request_id=read.read_id,
+        source_id=read.source_id,
+        unit_id=read.unit_id,
+        bit_kind=read.bit_kind,
+        address=read.address,
+        quantity=1,
     )
 
 
@@ -171,6 +209,7 @@ class AcquisitionSession:
         *,
         transport_factory: TransportFactory = open_serial_transport,
         onewire_bus_factory: OneWireBusFactory = open_onewire_bus,
+        bit_transport_factory: BitTransportFactory = open_bit_transport,
         clock: Clock = utc_now,
         historian: SqliteMeasurementHistorian | None = None,
     ) -> None:
@@ -187,7 +226,9 @@ class AcquisitionSession:
             clock=clock,
         )
         self._runner = AcquisitionRunner(self._pipeline, clock=clock)
-        self._plan = self._build_plan(transport_factory, onewire_bus_factory)
+        self._plan = self._build_plan(
+            transport_factory, onewire_bus_factory, bit_transport_factory
+        )
 
     @property
     def historian(self) -> SqliteMeasurementHistorian:
@@ -231,6 +272,7 @@ class AcquisitionSession:
         self,
         transport_factory: TransportFactory,
         onewire_bus_factory: OneWireBusFactory,
+        bit_transport_factory: BitTransportFactory,
     ) -> AcquisitionPlan:
         requests: list[AcquisitionRequest] = []
 
@@ -274,6 +316,21 @@ class AcquisitionSession:
                 )
             )
 
+        for source in self._config.sources:
+            bit_reads = tuple(
+                read for read in self._config.bit_reads if read.source_id == source.source_id
+            )
+            if not bit_reads:
+                continue
+
+            requests.append(
+                AcquisitionRequest(
+                    request_id=f"{source.source_id}:bits",
+                    profile_id=None,
+                    executor=_bit_executor_for(bit_transport_factory(source), bit_reads),
+                )
+            )
+
         return AcquisitionPlan(plan_id="installation", requests=tuple(requests))
 
 
@@ -312,6 +369,50 @@ def _onewire_executor_for(
                 )
                 continue
             results.extend(pipeline.ingest_raw_measurements((raw,)))
+        return tuple(results)
+
+    return execute
+
+
+def _bit_executor_for(
+    transport: ModbusBitTransport,
+    reads: tuple[BitReadConfig, ...],
+) -> RequestExecutor:
+    def execute(pipeline: AcquisitionPipeline) -> tuple[AcquisitionResult, ...]:
+        results: list[AcquisitionResult] = []
+        for read in reads:
+            try:
+                response = transport.read_bits(build_bit_read_request(read))
+            except ModbusTransportError as error:
+                results.append(
+                    AcquisitionFailure(
+                        code=AcquisitionErrorCode.READ_FAILED,
+                        message=str(error),
+                        context=AcquisitionContext(
+                            source_id=read.source_id,
+                            profile_id=None,
+                            register_id=read.read_id,
+                            sensor_id=read.sensor_id,
+                        ),
+                        acquired_at=utc_now(),
+                    )
+                )
+                continue
+
+            asserted = response.bits[0] != read.inverted
+            results.extend(
+                pipeline.ingest_raw_measurements(
+                    (
+                        RawMeasurement(
+                            source_id=read.source_id,
+                            sensor_id=read.sensor_id,
+                            value=1 if asserted else 0,
+                            unit=STATE_UNIT,
+                            timestamp=response.observed_at,
+                        ),
+                    )
+                )
+            )
         return tuple(results)
 
     return execute

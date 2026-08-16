@@ -2,7 +2,7 @@
 
 **Status:** Draft
 **Scope:** reading discrete inputs and coils, read-only
-**Not wired into the runtime.** See the domain gap below, which blocks it.
+**Wired into the runtime.** Zone calls are recorded alongside temperatures.
 
 Register reads answer "how warm is the loop". Bit reads answer "is zone 1
 calling", which is the measurement that tests whether zoning is behind the
@@ -51,10 +51,9 @@ separation that matters: capability, not shape.
 The pyserial implementation accepts an already-open serial port, so all three
 share one physical bus.
 
-## The domain gap that blocks ingestion
+## The domain gap this required closing
 
-GeoPilot cannot yet store the fact that zone 1 is calling. Four things stand
-in the way:
+Storing "zone 1 is calling" was blocked by four things:
 
 - `Measurement.value` is numeric and **explicitly rejects booleans**;
 - `SensorMeasurementKind` knows temperature, relative humidity and power. There
@@ -69,9 +68,9 @@ would be exactly the improvisation this project forbids elsewhere for register
 addresses. So the transport stops at the boundary and the decision is left
 where it belongs.
 
-The decision is proposed in [Discrete State ADR](DISCRETE_STATE_ADR.md): a
-`STATE` sensor kind, a canonical `state` unit, and values restricted to 0 or 1.
-Ingestion stays blocked until that ADR is accepted.
+[Discrete State ADR](DISCRETE_STATE_ADR.md) closed it: a `STATE` sensor kind, a
+canonical `state` unit, and values restricted to 0 or 1. Inversion lives in the
+bit read configuration, so a stored `1` always means asserted.
 
 ## Testing
 
@@ -89,4 +88,5 @@ rejection, and the fake transport.
   capability;
 - no register-and-bit batching. Each request is its own transaction, which is
   what a half-duplex RS485 segment permits anyway;
-- no ingestion, pending the domain decision above.
+- one bit per read. A four-zone panel is four requests, which a half-duplex
+  segment would serialise anyway.

@@ -1,6 +1,6 @@
 # ADR: Discrete State Representation
 
-**Status:** Proposed, awaiting review
+**Status:** Accepted, implemented
 **Scope:** how GeoPilot stores an observation that is on or off
 **Blocks:** ingesting Modbus discrete inputs, which is the measurement that
 tests whether zoning causes the high-pressure lockouts
