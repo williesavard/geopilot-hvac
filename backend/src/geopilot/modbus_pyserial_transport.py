@@ -77,7 +77,7 @@ class PySerialModbusTransport:
     ) -> None:
         self._config = config
         self._clock = clock
-        self._serial = _open_serial(config, serial_factory=serial_factory)
+        self._serial = open_serial_port(config, serial_factory=serial_factory)
 
     def read_registers(self, request: ModbusReadRequest) -> ModbusReadResponse:
         """Read raw register words for one holding or input register request."""
@@ -185,11 +185,17 @@ class PySerialModbusTransport:
         return data
 
 
-def _open_serial(
+def open_serial_port(
     config: PySerialModbusConfig,
     *,
-    serial_factory: SerialFactory | None,
+    serial_factory: SerialFactory | None = None,
 ) -> SerialPort:
+    """Open a serial port, or build one from an injected factory.
+
+    Public so the write transport can share one physical bus rather than
+    opening a second port on the same device.
+    """
+
     if serial_factory is not None:
         return serial_factory(
             port=config.port,
