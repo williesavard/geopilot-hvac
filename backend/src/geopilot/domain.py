@@ -52,6 +52,7 @@ class MeasurementKind(StrEnum):
     HUMIDITY = "humidity"
     RUNTIME = "runtime"
     MODE = "mode"
+    STATE = "state"
     UNKNOWN = "unknown"
 
 
@@ -61,6 +62,7 @@ class SensorMeasurementKind(StrEnum):
     TEMPERATURE = "temperature"
     RELATIVE_HUMIDITY = "relative_humidity"
     POWER = "power"
+    STATE = "state"
 
 
 class SourceType(StrEnum):

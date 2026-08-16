@@ -12,6 +12,7 @@ from geopilot.domain import (
     MeasurementKind,
     Residence,
     Sensor,
+    SensorMeasurementKind,
     SystemType,
 )
 from geopilot.ingestion import (
@@ -457,3 +458,79 @@ def test_ingested_measurement_serializes_to_dict() -> None:
         "quality": "good",
         "source_id": "source_simulator",
     }
+
+
+def state_sensor() -> Sensor:
+    return Sensor(
+        id="sensor_zone_1_call",
+        equipment_id="equipment_main",
+        name="Zone 1 call",
+        measurement_kind=MeasurementKind.STATE,
+        unit="state",
+        source_id="source_simulator",
+        created_at=OBSERVED,
+        sensor_kind=SensorMeasurementKind.STATE,
+    )
+
+
+def test_a_state_is_stored_unchanged() -> None:
+    measurement = service_for(state_sensor()).ingest(
+        raw_measurement(sensor_id="sensor_zone_1_call", value=1, unit="state")
+    )
+
+    assert measurement.value == 1
+    assert measurement.unit == "state"
+
+
+def test_a_state_value_stays_an_integer() -> None:
+    """0 and 1 must not become floats, so a state never reads as 1.0."""
+
+    measurement = service_for(state_sensor()).ingest(
+        raw_measurement(sensor_id="sensor_zone_1_call", value=0, unit="state")
+    )
+
+    assert isinstance(measurement.value, int)
+
+
+def test_a_fractional_state_is_refused() -> None:
+    """A quantity that can be 0.7 is not a state."""
+
+    with pytest.raises(IngestionError, match="must be 0 or 1"):
+        service_for(state_sensor()).ingest(
+            raw_measurement(sensor_id="sensor_zone_1_call", value=0.7, unit="state")
+        )
+
+
+def test_a_state_above_one_is_refused() -> None:
+    with pytest.raises(IngestionError, match="must be 0 or 1"):
+        service_for(state_sensor()).ingest(
+            raw_measurement(sensor_id="sensor_zone_1_call", value=2, unit="state")
+        )
+
+
+def test_a_boolean_never_reaches_normalization() -> None:
+    """The domain rejects booleans before a unit is ever considered."""
+
+    with pytest.raises(IngestionError, match="numeric"):
+        raw_measurement(sensor_id="sensor_zone_1_call", value=True, unit="state")
+
+
+def test_a_state_sensor_refuses_a_physical_unit() -> None:
+    with pytest.raises(IncompatibleMeasurementUnitError, match="state sensors"):
+        service_for(state_sensor()).ingest(
+            raw_measurement(sensor_id="sensor_zone_1_call", value=1, unit="degC")
+        )
+
+
+def test_a_temperature_sensor_refuses_the_state_unit() -> None:
+    with pytest.raises(IncompatibleMeasurementUnitError):
+        service_for(temperature_sensor()).ingest(
+            raw_measurement(value=1, unit="state")
+        )
+
+
+def test_state_normalizes_without_a_sensor() -> None:
+    measurement = normalize(raw_measurement(value=1, unit="state"))
+
+    assert measurement.value == 1
+    assert measurement.unit == "state"
