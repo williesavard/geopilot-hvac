@@ -36,6 +36,14 @@ class IncompatibleMeasurementUnitError(ValueError):
     """Raised when a unit is unsupported for a sensor capability."""
 
 
+STATE_UNIT = "state"
+"""Canonical unit for a discrete state.
+
+Not a physical dimension, and the only such unit in GeoPilot. `unit` is a
+required field, so a discrete measurement must name something, and naming it
+`state` is more honest than borrowing `%`.
+"""
+
 MetadataValue: TypeAlias = str | int | float | bool | None
 Metadata: TypeAlias = MappingProxyType[str, MetadataValue]
 Clock: TypeAlias = Callable[[], datetime]
@@ -158,6 +166,8 @@ class MeasurementNormalizer:
             return self._normalize_relative_humidity(value, unit)
         if sensor.sensor_kind is SensorMeasurementKind.POWER:
             return self._normalize_power(value, unit)
+        if sensor.sensor_kind is SensorMeasurementKind.STATE:
+            return self._normalize_state(value, unit)
 
         raise IncompatibleMeasurementUnitError(
             f"Sensor {sensor.id} does not declare a supported measurement capability"
@@ -170,8 +180,29 @@ class MeasurementNormalizer:
             return self._normalize_relative_humidity(value, unit)
         if unit in {"W", "kW"}:
             return self._normalize_power(value, unit)
+        if unit == STATE_UNIT:
+            return self._normalize_state(value, unit)
 
         raise IngestionError(f"Unsupported unit: {unit}")
+
+    def _normalize_state(self, value: int | float, unit: str) -> NormalizedUnit:
+        """Validate a discrete state, converting nothing.
+
+        A state is asserted or it is not. There is no conversion to perform, so
+        the whole job is refusing anything that is not 0 or 1. A quantity that
+        can be 0.7 is not a state, and rounding it would invent an observation
+        nobody made. See `docs/DISCRETE_STATE_ADR.md`.
+        """
+
+        if unit != STATE_UNIT:
+            raise IncompatibleMeasurementUnitError(
+                f"Unit {unit} is incompatible with state sensors"
+            )
+        if value not in (0, 1):
+            raise IngestionError(
+                f"a state value must be 0 or 1, received {value}"
+            )
+        return NormalizedUnit(value=int(value), unit=STATE_UNIT)
 
     def _normalize_temperature(self, value: int | float, unit: str) -> NormalizedUnit:
         match unit:
