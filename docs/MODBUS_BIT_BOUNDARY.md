@@ -53,7 +53,8 @@ share one physical bus.
 
 ## The domain gap that blocks ingestion
 
-**GeoPilot cannot yet store "zone 1 is calling."**
+GeoPilot cannot yet store the fact that zone 1 is calling. Four things stand
+in the way:
 
 - `Measurement.value` is numeric and **explicitly rejects booleans**;
 - `SensorMeasurementKind` knows temperature, relative humidity and power. There
