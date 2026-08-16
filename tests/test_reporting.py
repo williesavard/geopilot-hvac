@@ -18,11 +18,14 @@ from geopilot.reporting import (
     ReportingError,
     bucketed,
     bucketed_delta,
+    bucketed_runs,
     coverage,
     delta,
     duty_cycle,
     open_readonly,
+    runs,
     summarize,
+    summarize_runs,
 )
 from geopilot.sqlite_historian import SqliteMeasurementHistorian
 
@@ -1213,6 +1216,226 @@ def test_inverse_gated_buckets_report_the_recovery(tmp_path: Path) -> None:
     assert len(buckets) == 1
     assert buckets[0].count == 2
     assert buckets[0].mean == pytest.approx(0.1)
+
+
+def state_series(
+    tmp_path: Path,
+    pattern: str,
+    *,
+    every: timedelta = timedelta(minutes=1),
+    sensor_id: str = "sensor_compressor",
+    unit: str = "state",
+) -> sqlite3.Connection:
+    """Record a state sensor from a string like "111001", one character per sample.
+
+    A dot skips a sample, which is how a recording gap is written.
+    """
+
+    measurements = []
+    for index, character in enumerate(pattern):
+        if character == ".":
+            continue
+        measurements.append(
+            measurement(
+                index=index,
+                sensor_id=sensor_id,
+                value=int(character),
+                unit=unit,
+                observed_at=START + index * every,
+            )
+        )
+    return recorded(tmp_path, measurements)
+
+
+def test_runs_split_a_series_at_every_transition(tmp_path: Path) -> None:
+    connection = state_series(tmp_path, "1110011000")
+
+    found = runs(connection, "sensor_compressor")
+
+    assert [(run.asserted, run.samples) for run in found] == [
+        (True, 3),
+        (False, 2),
+        (True, 2),
+        (False, 3),
+    ]
+
+
+def test_a_run_spans_its_first_and_last_observation(tmp_path: Path) -> None:
+    """The real transitions happened in the sampling gaps; nothing is extrapolated."""
+
+    connection = state_series(tmp_path, "1110")
+
+    first = runs(connection, "sensor_compressor")[0]
+
+    assert first.starts_at == START
+    assert first.ends_at == START + timedelta(minutes=2)
+    assert first.duration == timedelta(minutes=2)
+
+
+def test_a_run_seen_once_has_no_duration(tmp_path: Path) -> None:
+    connection = state_series(tmp_path, "010")
+
+    middle = runs(connection, "sensor_compressor")[1]
+
+    assert middle.samples == 1
+    assert middle.duration == timedelta(0)
+
+
+def test_one_sense_can_be_selected(tmp_path: Path) -> None:
+    connection = state_series(tmp_path, "1110011000")
+
+    assert len(runs(connection, "sensor_compressor", asserted=True)) == 2
+    assert len(runs(connection, "sensor_compressor", asserted=False)) == 2
+    assert len(runs(connection, "sensor_compressor")) == 4
+
+
+def test_the_first_and_last_runs_are_truncated(tmp_path: Path) -> None:
+    """Their real edges lie outside the window, so their durations are lower bounds."""
+
+    connection = state_series(tmp_path, "110011")
+
+    found = runs(connection, "sensor_compressor")
+
+    assert [run.truncated for run in found] == [True, False, True]
+
+
+def test_a_gap_ends_a_run_even_when_the_value_holds(tmp_path: Path) -> None:
+    """Assuming a signal held across an outage is the mistake this refuses."""
+
+    connection = state_series(tmp_path, "11..........11")
+
+    found = runs(connection, "sensor_compressor")
+
+    assert len(found) == 2
+    assert all(run.asserted for run in found)
+    assert all(run.truncated for run in found)
+
+
+def test_a_short_hole_does_not_end_a_run(tmp_path: Path) -> None:
+    """One missed cycle is an ordinary hiccup, not an outage."""
+
+    connection = state_series(tmp_path, "11.11")
+
+    found = runs(connection, "sensor_compressor")
+
+    assert len(found) == 1
+    assert found[0].samples == 4
+    assert found[0].duration == timedelta(minutes=4)
+
+
+def test_the_break_threshold_is_adjustable(tmp_path: Path) -> None:
+    connection = state_series(tmp_path, "11.11")
+
+    assert len(runs(connection, "sensor_compressor", max_gap=timedelta(minutes=1))) == 2
+
+
+def test_a_zero_break_threshold_is_refused(tmp_path: Path) -> None:
+    connection = state_series(tmp_path, "11")
+
+    with pytest.raises(ReportingError, match="cannot be broken"):
+        runs(connection, "sensor_compressor", max_gap=timedelta(0))
+
+
+def test_runs_refuse_a_sensor_that_is_not_a_state(tmp_path: Path) -> None:
+    connection = state_series(tmp_path, "11", unit="degC")
+
+    with pytest.raises(ReportingError, match="not state"):
+        runs(connection, "sensor_compressor")
+
+
+def test_a_run_summary_describes_length_and_frequency(tmp_path: Path) -> None:
+    connection = state_series(tmp_path, "0111011110")
+
+    summary = summarize_runs(connection, "sensor_compressor", asserted=True)
+
+    assert summary is not None
+    assert summary.count == 2
+    assert summary.shortest == timedelta(minutes=2)
+    assert summary.longest == timedelta(minutes=3)
+    assert summary.mean == timedelta(minutes=2, seconds=30)
+    assert summary.total == timedelta(minutes=5)
+    assert summary.truncated == 0
+
+
+def test_a_run_summary_counts_the_truncated_ones(tmp_path: Path) -> None:
+    connection = state_series(tmp_path, "1101")
+
+    summary = summarize_runs(connection, "sensor_compressor", asserted=True)
+
+    assert summary is not None
+    assert summary.truncated == 2
+
+
+def test_a_sense_that_never_occurs_has_no_summary(tmp_path: Path) -> None:
+    connection = state_series(tmp_path, "1111")
+
+    assert summarize_runs(connection, "sensor_compressor", asserted=False) is None
+
+
+def test_run_buckets_count_starts_per_interval(tmp_path: Path) -> None:
+    """This is the number that separates 22 long cycles from 38 short ones."""
+
+    connection = state_series(tmp_path, "10" * 40, every=timedelta(minutes=1))
+
+    buckets = bucketed_runs(
+        connection,
+        "sensor_compressor",
+        asserted=True,
+        interval=timedelta(hours=1),
+        local=False,
+    )
+
+    assert [bucket.count for bucket in buckets] == [30, 10]
+
+
+def test_run_bucket_values_are_durations_in_seconds(tmp_path: Path) -> None:
+    connection = state_series(tmp_path, "0111011110")
+
+    bucket = bucketed_runs(
+        connection,
+        "sensor_compressor",
+        asserted=True,
+        interval=timedelta(hours=1),
+        local=False,
+    )[0]
+
+    assert (bucket.minimum, bucket.maximum, bucket.mean) == (120.0, 180.0, 150.0)
+
+
+def test_a_run_falls_in_the_bucket_it_started_in(tmp_path: Path) -> None:
+    """A cycle spanning midnight belongs to the day it began."""
+
+    connection = state_series(tmp_path, "0" * 59 + "1" * 5, every=timedelta(minutes=1))
+
+    buckets = bucketed_runs(
+        connection,
+        "sensor_compressor",
+        asserted=True,
+        interval=timedelta(hours=1),
+        local=False,
+    )
+
+    assert len(buckets) == 1
+    assert buckets[0].starts_at == START
+    assert buckets[0].count == 1
+
+
+def test_runs_and_duty_cycle_answer_different_questions(tmp_path: Path) -> None:
+    """Identical duty cycles, opposite cycling behaviour. The duty cycle cannot tell."""
+
+    steady_path = tmp_path / "steady"
+    chattering_path = tmp_path / "chattering"
+    steady_path.mkdir()
+    chattering_path.mkdir()
+
+    steady = state_series(steady_path, "1" * 20 + "0" * 20)
+    chattering = state_series(chattering_path, "10" * 20)
+
+    assert duty_cycle(steady, "sensor_compressor") == duty_cycle(
+        chattering, "sensor_compressor"
+    )
+    assert len(runs(steady, "sensor_compressor", asserted=True)) == 1
+    assert len(runs(chattering, "sensor_compressor", asserted=True)) == 20
 
 
 def test_a_report_can_be_produced_while_recording_continues(tmp_path: Path) -> None:
