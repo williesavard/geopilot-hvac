@@ -889,7 +889,10 @@ def test_a_gated_delta_describes_only_the_running_moments(tmp_path: Path) -> Non
 
     assert ungated is not None
     assert gated is not None
-    assert ungated.mean == 1.55
+    # approx, not equality: the idle delta is 0.1, which no float represents
+    # exactly, and Python 3.12 changed sum() to compensated summation — so the
+    # last bit of this mean differs between interpreters.
+    assert ungated.mean == pytest.approx(1.55)
     assert gated.mean == 3.0
     assert gated.count == 2
 
