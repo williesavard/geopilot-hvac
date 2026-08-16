@@ -133,6 +133,87 @@ Runs at the edge of the window, and runs cut by a gap, are counted as
 **truncated** and reported as such. Their durations are lower bounds and belong
 out of any average, not silently inside one.
 
+## What was happening before an event
+
+Runs say the compressor cycled. They do not say what the loop was doing when it
+stopped. `--events` takes the runs of one signal as **moments** and reports what
+another sensor — or a delta — was doing in a window around each one.
+
+```bash
+python3 tools/geopilot_report.py --database geopilot.sqlite3 \
+    --sensor sensor_loop_out --minus sensor_loop_in \
+    --events sensor_lockout --sense on --before 20m
+```
+
+```text
+subject: sensor_loop_out minus sensor_loop_in
+events : asserted runs of sensor_lockout, at their start
+window : 20m 0s before to 0s after
+
+event at                     count        min        max       mean
+2026-07-15T07:10:06-04:00       20       0.15        3.1      2.098
+2026-07-15T15:00:06-04:00       20       0.15        3.1      2.098
+2026-07-15T21:50:06-04:00       20       0.15        3.1      2.098
+
+pooled mean around these events: 2.098
+mean over the whole window:       2.938
+(the baseline includes these windows, so any contrast is understated)
+
+this describes what happened around the events; it does not say why
+```
+
+Event moments carry the **local wall clock**, so they can be checked against
+your own memory of the evening rather than against Greenwich.
+
+### If you have no lockout contact
+
+You need a signal that marks the event. A fault relay, or the equipment's own
+lockout output, wired as a discrete input. Without one there is nothing to
+anchor to, because **GeoPilot will not infer a fault** — a cycle that ended is
+just a cycle that ended, and deciding otherwise is interpretation.
+
+Until that contact exists, the usable proxy is the end of every cycle:
+
+```bash
+python3 tools/geopilot_report.py --database geopilot.sqlite3 \
+    --sensor sensor_loop_out --minus sensor_loop_in \
+    --events sensor_compressor --sense on --edge end --before 20m
+```
+
+Every cycle end, lockouts included. If the ones that were lockouts sit apart
+from the rest in that table, you have found something without needing the
+contact — and a reason to install it.
+
+### Details that decide what the numbers mean
+
+**The window is half open**, `[event − before, event + after)`. With the default
+`--after 0s` the event's own moment is excluded, so "before" means before.
+`--after` reaches past it when what happened next is the question.
+
+**`--edge start`** anchors to the beginning of each run — the instant a lockout
+latched. **`--edge end`** anchors to its last observation.
+
+**The pooled mean weights every reading equally**, not every event. A mean of
+means would give an event with three readings the same say as one with three
+hundred.
+
+**The baseline is the same measurement over the whole window**, and that window
+*includes* the approach windows. So the contrast is understated, never
+overstated. If a difference shows through anyway, it is not an artefact of the
+comparison.
+
+**An event whose window holds no reading is left out**, not reported as a zero,
+and the count of those is printed.
+
+### What this is not
+
+**It does not explain.** That the delta was low before every lockout is a fact
+about the recording. Which of the two caused the other, if either, is not in the
+data, and the tool says so on every run.
+
+**Three events are three events.** Nothing here computes significance, and a
+pattern across a handful of events is a reason to keep recording, not a finding.
+
 ## The loop delta
 
 ```bash
@@ -389,9 +470,14 @@ was below −10", nor to combine two state sensors.
 stretch they belong to. For durations, use `--runs`, which answers a different
 question and is not combined with `--while` or `--minus`.
 
-**Runs describe one signal, not a relationship.** There is no way to ask how the
-loop delta behaved *within* a run, nor to line runs of one sensor up against
-runs of another.
+**Runs describe one signal.** `--events` lines a second sensor up against a
+signal's run boundaries, but there is still no way to ask how the delta behaved
+*within* a run, nor to compare runs of one sensor against runs of another.
+
+**`--events` does not compare against a matched baseline.** The contrast is
+against the whole window, not against windows of the same length picked from
+comparable conditions. That is a weaker comparison than a proper control, and
+it is the one available without inventing criteria.
 
 **Its largest gap and its pairing are computed in Python** rather than in SQL.
 The pairing streams both series and holds two rows at a time, so it does not
@@ -441,3 +527,10 @@ adjustable threshold, starts counted per interval, a run belonging to the
 interval it started in, and the case that motivates the whole feature — two
 series with an identical duty cycle, one of which is a single run and the other
 twenty.
+
+For events: one approach per event, the event's own moment excluded by the
+half-open window, `--after` reaching past it, anchoring to either edge, an event
+with no reading in range being left out rather than zeroed, the idle sense
+supplying events, an event moment carrying the local wall clock, pooling
+weighted by readings rather than by event, and the three refusals — an unknown
+edge, a zero-length window and a backwards one.

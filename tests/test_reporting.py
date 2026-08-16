@@ -15,7 +15,9 @@ from pathlib import Path
 import pytest
 from geopilot.domain import DataQuality, Measurement
 from geopilot.reporting import (
+    Approach,
     ReportingError,
+    approaches,
     bucketed,
     bucketed_delta,
     bucketed_runs,
@@ -23,6 +25,7 @@ from geopilot.reporting import (
     delta,
     duty_cycle,
     open_readonly,
+    pooled_mean,
     runs,
     summarize,
     summarize_runs,
@@ -1436,6 +1439,277 @@ def test_runs_and_duty_cycle_answer_different_questions(tmp_path: Path) -> None:
     )
     assert len(runs(steady, "sensor_compressor", asserted=True)) == 1
     assert len(runs(chattering, "sensor_compressor", asserted=True)) == 20
+
+
+def lockout_series(
+    tmp_path: Path,
+    *,
+    spreads: tuple[float, ...],
+    lockouts: str,
+) -> sqlite3.Connection:
+    """A loop delta sampled every minute, with a lockout signal beside it."""
+
+    measurements = []
+    for index, (spread, locked) in enumerate(zip(spreads, lockouts, strict=True)):
+        moment = START + timedelta(minutes=index)
+        measurements.append(
+            measurement(index=index, sensor_id="sensor_loop_in", value=2.0, observed_at=moment)
+        )
+        measurements.append(
+            measurement(
+                index=index,
+                sensor_id="sensor_loop_out",
+                value=2.0 - spread,
+                observed_at=moment + timedelta(seconds=3),
+            )
+        )
+        measurements.append(
+            measurement(
+                index=index,
+                sensor_id="sensor_lockout",
+                value=int(locked),
+                unit="state",
+                observed_at=moment,
+            )
+        )
+    return recorded(tmp_path, measurements)
+
+
+def test_an_approach_describes_the_window_before_each_event(tmp_path: Path) -> None:
+    connection = lockout_series(
+        tmp_path,
+        spreads=(3.0, 3.0, 1.0, 1.0, 0.0, 0.0),
+        lockouts="000011",
+    )
+
+    found = approaches(
+        connection,
+        "sensor_loop_in",
+        minus="sensor_loop_out",
+        events="sensor_lockout",
+        before=timedelta(minutes=2),
+    )
+
+    assert len(found) == 1
+    assert found[0].event_at == START + timedelta(minutes=4)
+    assert found[0].count == 2
+    assert found[0].mean == 1.0
+
+
+def test_the_event_moment_itself_is_excluded(tmp_path: Path) -> None:
+    """`before` means before. A half-open window keeps the event out of its own stats."""
+
+    connection = lockout_series(
+        tmp_path,
+        spreads=(3.0, 3.0, 0.0, 0.0),
+        lockouts="0011",
+    )
+
+    found = approaches(
+        connection,
+        "sensor_loop_in",
+        minus="sensor_loop_out",
+        events="sensor_lockout",
+        before=timedelta(minutes=5),
+    )
+
+    assert found[0].count == 2
+    assert found[0].mean == 3.0
+
+
+def test_the_window_can_reach_past_the_event(tmp_path: Path) -> None:
+    connection = lockout_series(
+        tmp_path,
+        spreads=(3.0, 3.0, 0.0, 0.0),
+        lockouts="0011",
+    )
+
+    found = approaches(
+        connection,
+        "sensor_loop_in",
+        minus="sensor_loop_out",
+        events="sensor_lockout",
+        before=timedelta(minutes=5),
+        after=timedelta(minutes=5),
+    )
+
+    assert found[0].count == 4
+    assert found[0].mean == 1.5
+
+
+def test_one_approach_is_produced_per_event(tmp_path: Path) -> None:
+    connection = lockout_series(
+        tmp_path,
+        spreads=(3.0,) * 8,
+        lockouts="00110011",
+    )
+
+    found = approaches(
+        connection,
+        "sensor_loop_in",
+        events="sensor_lockout",
+        before=timedelta(minutes=2),
+    )
+
+    assert [approach.event_at for approach in found] == [
+        START + timedelta(minutes=2),
+        START + timedelta(minutes=6),
+    ]
+
+
+def test_an_approach_can_anchor_to_the_end_of_a_run(tmp_path: Path) -> None:
+    """Without a fault contact, the end of each cycle is the usable proxy."""
+
+    connection = lockout_series(
+        tmp_path,
+        spreads=(3.0,) * 6,
+        lockouts="011000",
+    )
+
+    found = approaches(
+        connection,
+        "sensor_loop_in",
+        events="sensor_lockout",
+        edge="end",
+        before=timedelta(minutes=2),
+    )
+
+    assert found[0].event_at == START + timedelta(minutes=2)
+
+
+def test_an_approach_works_on_a_single_sensor(tmp_path: Path) -> None:
+    connection = lockout_series(
+        tmp_path,
+        spreads=(3.0, 3.0, 3.0, 3.0),
+        lockouts="0011",
+    )
+
+    found = approaches(
+        connection,
+        "sensor_loop_out",
+        events="sensor_lockout",
+        before=timedelta(minutes=2),
+    )
+
+    assert found[0].mean == -1.0
+
+
+def test_an_event_with_no_reading_in_range_is_left_out(tmp_path: Path) -> None:
+    """Not reported as a zero. The count of results against the events shows it."""
+
+    connection = lockout_series(
+        tmp_path,
+        spreads=(3.0, 3.0),
+        lockouts="10",
+    )
+
+    found = approaches(
+        connection,
+        "sensor_loop_in",
+        events="sensor_lockout",
+        before=timedelta(minutes=5),
+    )
+
+    assert found == ()
+    assert len(runs(connection, "sensor_lockout", asserted=True)) == 1
+
+
+def test_the_idle_sense_can_supply_the_events(tmp_path: Path) -> None:
+    connection = lockout_series(
+        tmp_path,
+        spreads=(3.0,) * 4,
+        lockouts="1100",
+    )
+
+    found = approaches(
+        connection,
+        "sensor_loop_in",
+        events="sensor_lockout",
+        event_asserted=False,
+        before=timedelta(minutes=2),
+    )
+
+    assert len(found) == 1
+    assert found[0].event_at == START + timedelta(minutes=2)
+
+
+def test_an_event_moment_carries_the_local_wall_clock(tmp_path: Path) -> None:
+    """Cross-checking a lockout against your own evening needs your own clock."""
+
+    eastern = timezone(timedelta(hours=-4))
+    evening = datetime(2026, 7, 15, 21, 50, tzinfo=eastern)
+    connection = recorded(
+        tmp_path,
+        [
+            measurement(
+                index=0,
+                sensor_id="sensor_lockout",
+                value=0,
+                unit="state",
+                observed_at=evening,
+            ),
+            measurement(
+                index=1,
+                sensor_id="sensor_lockout",
+                value=1,
+                unit="state",
+                observed_at=evening + timedelta(minutes=1),
+            ),
+        ],
+    )
+
+    latched = runs(connection, "sensor_lockout", asserted=True)[0]
+
+    assert latched.starts_at.isoformat() == "2026-07-15T21:51:00-04:00"
+
+
+def test_an_unusable_edge_is_refused(tmp_path: Path) -> None:
+    connection = lockout_series(tmp_path, spreads=(3.0, 3.0), lockouts="01")
+
+    with pytest.raises(ReportingError, match="start or end"):
+        approaches(connection, "sensor_loop_in", events="sensor_lockout", edge="middle")
+
+
+def test_a_window_of_no_length_is_refused(tmp_path: Path) -> None:
+    connection = lockout_series(tmp_path, spreads=(3.0, 3.0), lockouts="01")
+
+    with pytest.raises(ReportingError, match="selects nothing"):
+        approaches(
+            connection,
+            "sensor_loop_in",
+            events="sensor_lockout",
+            before=timedelta(0),
+            after=timedelta(0),
+        )
+
+
+def test_a_backwards_window_is_refused(tmp_path: Path) -> None:
+    connection = lockout_series(tmp_path, spreads=(3.0, 3.0), lockouts="01")
+
+    with pytest.raises(ReportingError, match="backwards"):
+        approaches(
+            connection,
+            "sensor_loop_in",
+            events="sensor_lockout",
+            before=timedelta(minutes=-5),
+        )
+
+
+def test_events_must_come_from_a_state_sensor(tmp_path: Path) -> None:
+    connection = lockout_series(tmp_path, spreads=(3.0, 3.0), lockouts="01")
+
+    with pytest.raises(ReportingError, match="not state"):
+        approaches(connection, "sensor_loop_in", events="sensor_loop_out")
+
+
+def test_pooling_weights_each_event_by_its_readings(tmp_path: Path) -> None:
+    """A mean of means would give three readings the weight of three hundred."""
+
+    heavy = Approach(event_at=START, count=300, minimum=0.0, maximum=4.0, mean=3.0)
+    light = Approach(event_at=START, count=3, minimum=0.0, maximum=1.0, mean=1.0)
+
+    assert pooled_mean((heavy, light)) == pytest.approx(2.980, abs=0.001)
+    assert pooled_mean(()) is None
 
 
 def test_a_report_can_be_produced_while_recording_continues(tmp_path: Path) -> None:

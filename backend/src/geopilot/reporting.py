@@ -20,7 +20,7 @@ ratio of samples, not a diagnosis.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -56,6 +56,14 @@ Five missed cycles at the documented one-minute poll. Below that a stretch is
 treated as continuous; above it, what happened is unknown and the run is closed
 rather than assumed to have held. Poll more slowly and this must go up, or every
 ordinary interval will read as an outage.
+"""
+
+DEFAULT_APPROACH = timedelta(minutes=15)
+"""How far back an approach window reaches by default.
+
+Fifteen minutes because that is the short end of the range the installation's
+lockouts were observed in. It is a starting point for looking, not a claim that
+fifteen minutes is the interval that matters.
 """
 
 
@@ -108,6 +116,9 @@ class Run:
     and last runs in a window, and any run cut by a recording gap. Their
     durations are lower bounds and should be left out of duration statistics
     rather than averaged in.
+
+    `starts_at` and `ends_at` carry the UTC offset that was in effect where the
+    readings were taken, so they read as the clock on the wall did.
     """
 
     starts_at: datetime
@@ -132,6 +143,21 @@ class RunSummary:
     mean: timedelta
     total: timedelta
     truncated: int
+
+
+@dataclass(frozen=True, slots=True)
+class Approach:
+    """What a subject was doing in a window around one event.
+
+    `event_at` is the moment itself, not the start of the window. The statistics
+    describe the window.
+    """
+
+    event_at: datetime
+    count: int
+    minimum: float
+    maximum: float
+    mean: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -657,7 +683,7 @@ def _detect_runs(
             yield building.close(open_end=False)
             building = _BuildingRun(value, microseconds, offset_seconds, open_start=False)
         else:
-            building.extend(microseconds)
+            building.extend(microseconds, offset_seconds)
 
     if building is not None:
         yield building.close(open_end=True)
@@ -671,6 +697,7 @@ class _BuildingRun:
         "first_microseconds",
         "first_offset_seconds",
         "last_microseconds",
+        "last_offset_seconds",
         "samples",
         "open_start",
     )
@@ -682,17 +709,19 @@ class _BuildingRun:
         self.first_microseconds = microseconds
         self.first_offset_seconds = offset_seconds
         self.last_microseconds = microseconds
+        self.last_offset_seconds = offset_seconds
         self.samples = 1
         self.open_start = open_start
 
-    def extend(self, microseconds: int) -> None:
+    def extend(self, microseconds: int, offset_seconds: int) -> None:
         self.last_microseconds = microseconds
+        self.last_offset_seconds = offset_seconds
         self.samples += 1
 
     def close(self, *, open_end: bool) -> Run:
         return Run(
-            starts_at=_from_microseconds(self.first_microseconds),
-            ends_at=_from_microseconds(self.last_microseconds),
+            starts_at=_at_offset(self.first_microseconds, self.first_offset_seconds),
+            ends_at=_at_offset(self.last_microseconds, self.last_offset_seconds),
             duration=timedelta(microseconds=self.last_microseconds - self.first_microseconds),
             samples=self.samples,
             asserted=self.value == 1,
@@ -700,6 +729,103 @@ class _BuildingRun:
             started_microseconds=self.first_microseconds,
             started_offset_seconds=self.first_offset_seconds,
         )
+
+
+def approaches(
+    connection: sqlite3.Connection,
+    sensor_id: str,
+    *,
+    events: str,
+    event_asserted: bool = True,
+    edge: str = "start",
+    before: timedelta = DEFAULT_APPROACH,
+    after: timedelta = timedelta(0),
+    minus: str | None = None,
+    tolerance: timedelta = DEFAULT_PAIRING_TOLERANCE,
+    max_gap: timedelta = DEFAULT_RUN_BREAK,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> tuple[Approach, ...]:
+    """Describe what a subject was doing around each run boundary of a signal.
+
+    The runs of `events` supply the moments; `sensor_id`, optionally `minus` a
+    second sensor, supplies what is measured. With `edge="start"` the moment is
+    the beginning of each run — the instant a lockout latched. With `edge="end"`
+    it is the run's last observation, which is what "as each cycle finished"
+    means when no fault contact exists to mark the real event.
+
+    The window is half open, `[moment - before, moment + after)`, so the default
+    `after=0` reports strictly what came **before** and excludes the moment
+    itself.
+
+    An event whose window holds no reading of the subject is left out rather
+    than reported as a zero. Compare the length of the result against the number
+    of events to see how many that was.
+
+    **This describes; it does not explain.** That the delta was low before every
+    lockout is a fact about the recording. Which of the two caused the other, if
+    either, is not in the data.
+    """
+
+    if edge not in ("start", "end"):
+        raise ReportingError(f"an approach is anchored to a run's start or end, not {edge!r}")
+    if before < timedelta(0) or after < timedelta(0):
+        raise ReportingError("an approach window cannot extend backwards")
+    if before + after <= timedelta(0):
+        raise ReportingError("an approach window of zero length selects nothing")
+
+    found = []
+    for run in runs(
+        connection,
+        events,
+        asserted=event_asserted,
+        max_gap=max_gap,
+        start=start,
+        end=end,
+    ):
+        moment = run.starts_at if edge == "start" else run.ends_at
+        opens_at, closes_at = moment - before, moment + after
+
+        summary: SensorSummary | DeltaSummary | None
+        if minus is None:
+            summary = summarize(connection, sensor_id, start=opens_at, end=closes_at)
+        else:
+            summary = delta(
+                connection,
+                sensor_id,
+                minus=minus,
+                tolerance=tolerance,
+                start=opens_at,
+                end=closes_at,
+            )
+
+        if summary is None:
+            continue
+
+        found.append(
+            Approach(
+                event_at=moment,
+                count=summary.count,
+                minimum=summary.minimum,
+                maximum=summary.maximum,
+                mean=summary.mean,
+            )
+        )
+
+    return tuple(found)
+
+
+def pooled_mean(found: Sequence[Approach]) -> float | None:
+    """Average every reading behind a set of approaches, not the approach means.
+
+    A mean of means silently gives an event with three readings the same weight
+    as one with three hundred. Returns None when there is nothing to pool.
+    """
+
+    total = sum(approach.count for approach in found)
+    if not total:
+        return None
+    return sum(approach.mean * approach.count for approach in found) / total
 
 
 def duty_cycle(
@@ -1059,6 +1185,18 @@ def _append_window(
     if end is not None:
         clauses.append("observed_at_us < ?")
         parameters.append(epoch_microseconds(end))
+
+
+def _at_offset(microseconds: int, offset_seconds: int) -> datetime:
+    """Render an instant in the wall clock that was in effect where it was taken.
+
+    A homeowner cross-checking a lockout against their own memory of the evening
+    needs the hour their clock showed, not the hour in Greenwich.
+    """
+
+    return _from_microseconds(microseconds).astimezone(
+        timezone(timedelta(seconds=offset_seconds))
+    )
 
 
 def _from_microseconds(microseconds: int) -> datetime:

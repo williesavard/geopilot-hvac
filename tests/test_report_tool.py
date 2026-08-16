@@ -900,6 +900,226 @@ def test_the_break_threshold_is_settable(
     assert "count  : 2" in capsys.readouterr().out
 
 
+def lockout_database(tmp_path: Path, *, spreads: tuple[float, ...], lockouts: str) -> Path:
+    """A loop delta beside a lockout signal, one sample a minute."""
+
+    database = tmp_path / "lockouts.sqlite3"
+    with SqliteMeasurementHistorian(database) as historian:
+        for index, (spread, locked) in enumerate(zip(spreads, lockouts, strict=True)):
+            moment = START + timedelta(minutes=index)
+            rows = (
+                ("sensor_loop_in", 2.0, "degC", timedelta()),
+                ("sensor_loop_out", 2.0 - spread, "degC", timedelta(seconds=3)),
+                ("sensor_lockout", int(locked), "state", timedelta()),
+            )
+            for sensor_id, value, unit, lag in rows:
+                stamped = moment + lag
+                historian.append(
+                    Measurement(
+                        id=f"source_bus:{sensor_id}:{index}",
+                        sensor_id=sensor_id,
+                        observed_at=stamped,
+                        received_at=stamped,
+                        value=value,
+                        unit=unit,
+                        quality=DataQuality.GOOD,
+                        source_id="source_bus",
+                    )
+                )
+    return database
+
+
+def test_an_event_report_contrasts_the_approach_with_the_baseline(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = lockout_database(
+        tmp_path,
+        spreads=(3.0, 3.0, 1.0, 1.0, 0.0, 0.0),
+        lockouts="000011",
+    )
+
+    exit_code = main(
+        [
+            "--database",
+            str(database),
+            "--sensor",
+            "sensor_loop_in",
+            "--minus",
+            "sensor_loop_out",
+            "--events",
+            "sensor_lockout",
+            "--sense",
+            "on",
+            "--before",
+            "2m",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == EXIT_OK
+    assert "subject: sensor_loop_in minus sensor_loop_out" in output
+    assert "events : asserted runs of sensor_lockout, at their start" in output
+    assert "window : 2m 0s before to 0s after" in output
+    assert "pooled mean around these events: 1" in output
+    assert "mean over the whole window:       1.333" in output
+    assert "the baseline includes these windows" in output
+    assert "it does not say why" in output
+
+
+def test_an_event_report_names_the_events_it_could_not_cover(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = lockout_database(tmp_path, spreads=(3.0, 3.0, 3.0, 3.0), lockouts="1001")
+
+    main(
+        [
+            "--database",
+            str(database),
+            "--sensor",
+            "sensor_loop_in",
+            "--events",
+            "sensor_lockout",
+            "--sense",
+            "on",
+            "--before",
+            "2m",
+        ]
+    )
+
+    assert "1 of 2 events had no reading in range" in capsys.readouterr().out
+
+
+def test_an_event_report_can_anchor_to_a_run_end(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = lockout_database(tmp_path, spreads=(3.0,) * 6, lockouts="011000")
+
+    main(
+        [
+            "--database",
+            str(database),
+            "--sensor",
+            "sensor_loop_in",
+            "--events",
+            "sensor_lockout",
+            "--sense",
+            "on",
+            "--edge",
+            "end",
+            "--before",
+            "2m",
+        ]
+    )
+
+    assert "at their end" in capsys.readouterr().out
+
+
+def test_events_refuse_both_senses_at_once(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An event is one edge of one sense. --sense defaults to on here, not both."""
+
+    database = lockout_database(tmp_path, spreads=(3.0, 3.0), lockouts="01")
+
+    exit_code = main(
+        [
+            "--database",
+            str(database),
+            "--sensor",
+            "sensor_loop_in",
+            "--events",
+            "sensor_lockout",
+            "--sense",
+            "both",
+        ]
+    )
+
+    assert exit_code == EXIT_USAGE
+    assert "--sense on or --sense off" in capsys.readouterr().err
+
+
+def test_events_need_a_subject(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    database = lockout_database(tmp_path, spreads=(3.0, 3.0), lockouts="01")
+
+    exit_code = main(
+        ["--database", str(database), "--events", "sensor_lockout", "--sense", "on"]
+    )
+
+    assert exit_code == EXIT_USAGE
+    assert "--events needs --sensor" in capsys.readouterr().err
+
+
+def test_events_do_not_combine_with_buckets(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = lockout_database(tmp_path, spreads=(3.0, 3.0), lockouts="01")
+
+    exit_code = main(
+        [
+            "--database",
+            str(database),
+            "--sensor",
+            "sensor_loop_in",
+            "--events",
+            "sensor_lockout",
+            "--sense",
+            "on",
+            "--bucket",
+            "1h",
+        ]
+    )
+
+    assert exit_code == EXIT_USAGE
+    assert "does not combine with --while or --bucket" in capsys.readouterr().err
+
+
+def test_events_and_runs_are_different_questions(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = lockout_database(tmp_path, spreads=(3.0, 3.0), lockouts="01")
+
+    exit_code = main(
+        [
+            "--database",
+            str(database),
+            "--sensor",
+            "sensor_lockout",
+            "--runs",
+            "--events",
+            "sensor_lockout",
+        ]
+    )
+
+    assert exit_code == EXIT_USAGE
+    assert "ask for one" in capsys.readouterr().err
+
+
+def test_an_event_with_no_coverage_at_all_reports_no_data(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = lockout_database(tmp_path, spreads=(3.0, 3.0), lockouts="10")
+
+    exit_code = main(
+        [
+            "--database",
+            str(database),
+            "--sensor",
+            "sensor_loop_in",
+            "--events",
+            "sensor_lockout",
+            "--sense",
+            "on",
+            "--before",
+            "5m",
+        ]
+    )
+
+    assert exit_code == EXIT_NO_DATA
+    assert "no readings of sensor_loop_in around any sensor_lockout event" in (
+        capsys.readouterr().out
+    )
+
+
 def test_intervals_are_parsed_from_their_unit() -> None:
     assert parse_interval("30s") == timedelta(seconds=30)
     assert parse_interval("15m") == timedelta(minutes=15)

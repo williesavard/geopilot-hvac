@@ -28,6 +28,11 @@ Answers the questions a recording exists to answer, without a dashboard.
     python3 tools/geopilot_report.py --database db.sqlite3 \
         --sensor sensor_compressor --runs --sense on --bucket 1d
 
+    # what was the loop doing in the 20 minutes before each lockout?
+    python3 tools/geopilot_report.py --database db.sqlite3 \
+        --sensor sensor_loop_out --minus sensor_loop_in \
+        --events sensor_lockout --sense on --before 20m
+
 Read-only. It opens the database in read-only mode, so it can run while the
 recorder is still writing and cannot damage what it reads.
 """
@@ -42,11 +47,15 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
 from geopilot.reporting import (
+    DEFAULT_APPROACH,
     DEFAULT_PAIRING_TOLERANCE,
     DEFAULT_RUN_BREAK,
     Bucket,
+    DeltaSummary,
     ReportingError,
     RunSummary,
+    SensorSummary,
+    approaches,
     bucketed,
     bucketed_delta,
     bucketed_runs,
@@ -54,6 +63,8 @@ from geopilot.reporting import (
     delta,
     duty_cycle,
     open_readonly,
+    pooled_mean,
+    runs,
     summarize,
     summarize_runs,
 )
@@ -115,8 +126,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sense",
         choices=("on", "off", "both"),
-        default="both",
-        help="which runs to report, default both; --bucket needs a single sense",
+        help="which runs to use; default both for --runs, on for --events",
+    )
+    parser.add_argument(
+        "--events",
+        metavar="STATE_SENSOR",
+        help="report what --sensor was doing around each run boundary of this signal",
+    )
+    parser.add_argument(
+        "--edge",
+        choices=("start", "end"),
+        default="start",
+        help="anchor each event to the start of a run, the default, or to its end",
+    )
+    parser.add_argument(
+        "--before",
+        help="how far back an event window reaches, default 15m",
+    )
+    parser.add_argument(
+        "--after",
+        help="how far past the event it reaches, default 0s",
     )
     parser.add_argument(
         "--max-gap",
@@ -219,9 +248,41 @@ def main(argv: Sequence[str] | None = None) -> int:
             else DEFAULT_PAIRING_TOLERANCE
         )
         max_gap = parse_interval(arguments.max_gap) if arguments.max_gap else DEFAULT_RUN_BREAK
+        before = parse_interval(arguments.before) if arguments.before else DEFAULT_APPROACH
+        after = parse_interval(arguments.after) if arguments.after else timedelta(0)
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
         return EXIT_USAGE
+
+    if arguments.runs and arguments.events:
+        print(
+            "error: --runs measures a signal's own cycles, --events measures another "
+            "sensor around them; ask for one",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
+    if arguments.events:
+        if not arguments.sensor:
+            print(
+                "error: --events needs --sensor; an event window has to measure something",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        if arguments.while_asserted or arguments.while_not_asserted or interval is not None:
+            print(
+                "error: --events does not combine with --while or --bucket; its windows "
+                "are the events themselves",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        if arguments.sense == "both":
+            print(
+                "error: --events needs --sense on or --sense off; an event is one edge of "
+                "one sense",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
 
     if arguments.runs:
         if not arguments.sensor:
@@ -234,7 +295,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return EXIT_USAGE
-        if interval is not None and arguments.sense == "both":
+        if interval is not None and (arguments.sense or "both") == "both":
             print(
                 "error: --runs --bucket needs --sense on or --sense off; one table cannot "
                 "hold two series",
@@ -262,11 +323,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_USAGE
 
     try:
+        if arguments.events:
+            return _report_approaches(
+                connection,
+                arguments.sensor,
+                events=arguments.events,
+                minus=arguments.minus,
+                event_asserted=(arguments.sense or "on") == "on",
+                edge=arguments.edge,
+                before=before,
+                after=after,
+                tolerance=tolerance,
+                max_gap=max_gap,
+                start=start,
+                end=end,
+            )
         if arguments.runs:
             return _report_runs(
                 connection,
                 arguments.sensor,
-                sense=arguments.sense,
+                sense=arguments.sense or "both",
                 interval=interval,
                 max_gap=max_gap,
                 start=start,
@@ -577,6 +653,91 @@ def _print_run_summary(summary: RunSummary) -> None:
 
 def _sense_words(asserted: bool) -> str:
     return "asserted" if asserted else "idle"
+
+
+def _report_approaches(
+    connection: sqlite3.Connection,
+    sensor_id: str,
+    *,
+    events: str,
+    minus: str | None,
+    event_asserted: bool,
+    edge: str,
+    before: timedelta,
+    after: timedelta,
+    tolerance: timedelta,
+    max_gap: timedelta,
+    start: datetime | None,
+    end: datetime | None,
+) -> int:
+    found = approaches(
+        connection,
+        sensor_id,
+        events=events,
+        event_asserted=event_asserted,
+        edge=edge,
+        before=before,
+        after=after,
+        minus=minus,
+        tolerance=tolerance,
+        max_gap=max_gap,
+        start=start,
+        end=end,
+    )
+
+    subject = f"{sensor_id} minus {minus}" if minus else sensor_id
+    occasions = len(
+        runs(connection, events, asserted=event_asserted, max_gap=max_gap, start=start, end=end)
+    )
+
+    if not found:
+        print(f"no readings of {subject} around any {events} event in that window")
+        return EXIT_NO_DATA
+
+    print(f"subject: {subject}")
+    print(f"events : {_sense_words(event_asserted)} runs of {events}, at their {edge}")
+    print(f"window : {format_duration(before)} before to {format_duration(after)} after\n")
+
+    print(f"{'event at':26s} {'count':>7s} {'min':>10s} {'max':>10s} {'mean':>10s}")
+    for approach in found:
+        print(
+            f"{approach.event_at.isoformat():26s} {approach.count:>7,} "
+            f"{approach.minimum:>10g} {approach.maximum:>10g} {approach.mean:>10.4g}"
+        )
+
+    pooled = pooled_mean(found)
+    baseline = _baseline(connection, sensor_id, minus, tolerance, start, end)
+    if pooled is not None:
+        print(f"\npooled mean around these events: {pooled:.4g}")
+    if baseline is not None:
+        print(f"mean over the whole window:       {baseline:.4g}")
+        print("(the baseline includes these windows, so any contrast is understated)")
+
+    if len(found) < occasions:
+        print(f"\n{occasions - len(found):,} of {occasions:,} events had no reading in range")
+
+    print("\nthis describes what happened around the events; it does not say why")
+    return EXIT_OK
+
+
+def _baseline(
+    connection: sqlite3.Connection,
+    sensor_id: str,
+    minus: str | None,
+    tolerance: timedelta,
+    start: datetime | None,
+    end: datetime | None,
+) -> float | None:
+    """The same measurement over the whole window, for contrast."""
+
+    overall: DeltaSummary | SensorSummary | None
+    if minus:
+        overall = delta(
+            connection, sensor_id, minus=minus, tolerance=tolerance, start=start, end=end
+        )
+    else:
+        overall = summarize(connection, sensor_id, start=start, end=end)
+    return overall.mean if overall else None
 
 
 if __name__ == "__main__":
