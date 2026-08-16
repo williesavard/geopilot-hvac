@@ -716,6 +716,190 @@ def test_the_gate_description_carries_its_sense() -> None:
     assert describe_gate(None, None) == ""
 
 
+def cycling_database(tmp_path: Path, pattern: str) -> Path:
+    """Record a compressor call from a string like "111001", one sample a minute."""
+
+    database = tmp_path / "cycles.sqlite3"
+    with SqliteMeasurementHistorian(database) as historian:
+        for index, character in enumerate(pattern):
+            moment = START + timedelta(minutes=index)
+            historian.append(
+                Measurement(
+                    id=f"source_bus:sensor_compressor:{index}",
+                    sensor_id="sensor_compressor",
+                    observed_at=moment,
+                    received_at=moment,
+                    value=int(character),
+                    unit="state",
+                    quality=DataQuality.GOOD,
+                    source_id="source_bus",
+                )
+            )
+    return database
+
+
+def test_runs_report_both_senses_by_default(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = cycling_database(tmp_path, "0111011110")
+
+    exit_code = main(["--database", str(database), "--sensor", "sensor_compressor", "--runs"])
+
+    output = capsys.readouterr().out
+    assert exit_code == EXIT_OK
+    assert "runs   : sensor_compressor asserted" in output
+    assert "runs   : sensor_compressor idle" in output
+    assert "shortest: 2m 0s" in output
+    assert "longest : 3m 0s" in output
+
+
+def test_a_single_sense_can_be_asked_for(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = cycling_database(tmp_path, "0111011110")
+
+    main(
+        [
+            "--database",
+            str(database),
+            "--sensor",
+            "sensor_compressor",
+            "--runs",
+            "--sense",
+            "on",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert "asserted" in output
+    assert "idle" not in output
+
+
+def test_truncated_runs_are_flagged(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = cycling_database(tmp_path, "1101")
+
+    main(
+        ["--database", str(database), "--sensor", "sensor_compressor", "--runs", "--sense", "on"]
+    )
+
+    assert "durations are lower bounds" in capsys.readouterr().out
+
+
+def test_bucketed_runs_count_starts_per_interval(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The count column is the number that describes short cycling."""
+
+    database = cycling_database(tmp_path, "10" * 40)
+
+    exit_code = main(
+        [
+            "--database",
+            str(database),
+            "--sensor",
+            "sensor_compressor",
+            "--runs",
+            "--sense",
+            "on",
+            "--bucket",
+            "1h",
+            "--utc",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == EXIT_OK
+    assert "count is how many runs started; min, max and mean are seconds" in output
+    assert "      30 " in output
+
+
+def test_bucketed_runs_need_a_single_sense(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = cycling_database(tmp_path, "1100")
+
+    exit_code = main(
+        ["--database", str(database), "--sensor", "sensor_compressor", "--runs", "--bucket", "1h"]
+    )
+
+    assert exit_code == EXIT_USAGE
+    assert "--sense on or --sense off" in capsys.readouterr().err
+
+
+def test_runs_need_a_sensor(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    database = cycling_database(tmp_path, "1100")
+
+    assert main(["--database", str(database), "--runs"]) == EXIT_USAGE
+    assert "--runs needs --sensor" in capsys.readouterr().err
+
+
+def test_runs_do_not_combine_with_a_delta(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = cycling_database(tmp_path, "1100")
+
+    exit_code = main(
+        [
+            "--database",
+            str(database),
+            "--sensor",
+            "sensor_compressor",
+            "--runs",
+            "--minus",
+            "sensor_loop_out",
+        ]
+    )
+
+    assert exit_code == EXIT_USAGE
+    assert "does not combine" in capsys.readouterr().err
+
+
+def test_a_sense_that_never_occurs_is_named(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = cycling_database(tmp_path, "1111")
+
+    exit_code = main(
+        ["--database", str(database), "--sensor", "sensor_compressor", "--runs", "--sense", "off"]
+    )
+
+    assert exit_code == EXIT_NO_DATA
+    assert "no idle runs of sensor_compressor" in capsys.readouterr().out
+
+
+def test_the_break_threshold_is_settable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two runs at a one-minute threshold, one at the five-minute default."""
+
+    database = tmp_path / "hole.sqlite3"
+    with SqliteMeasurementHistorian(database) as historian:
+        for index in (0, 1, 3, 4):
+            moment = START + timedelta(minutes=index)
+            historian.append(
+                Measurement(
+                    id=f"source_bus:sensor_compressor:{index}",
+                    sensor_id="sensor_compressor",
+                    observed_at=moment,
+                    received_at=moment,
+                    value=1,
+                    unit="state",
+                    quality=DataQuality.GOOD,
+                    source_id="source_bus",
+                )
+            )
+
+    arguments = ["--database", str(database), "--sensor", "sensor_compressor", "--runs"]
+
+    main([*arguments, "--sense", "on"])
+    assert "count  : 1" in capsys.readouterr().out
+
+    main([*arguments, "--sense", "on", "--max-gap", "1m"])
+    assert "count  : 2" in capsys.readouterr().out
+
+
 def test_intervals_are_parsed_from_their_unit() -> None:
     assert parse_interval("30s") == timedelta(seconds=30)
     assert parse_interval("15m") == timedelta(minutes=15)

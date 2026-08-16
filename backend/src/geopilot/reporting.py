@@ -49,6 +49,15 @@ than once a minute and this must come down with it, or a sample will reach
 across into the neighbouring cycle.
 """
 
+DEFAULT_RUN_BREAK = timedelta(minutes=5)
+"""How long a hole in a state series may be before it ends the run.
+
+Five missed cycles at the documented one-minute poll. Below that a stretch is
+treated as continuous; above it, what happened is unknown and the run is closed
+rather than assumed to have held. Poll more slowly and this must go up, or every
+ordinary interval will read as an outage.
+"""
+
 
 class ReportingError(RuntimeError):
     """Raised when a database cannot be read for reporting."""
@@ -83,6 +92,46 @@ class Bucket:
     minimum: float
     maximum: float
     mean: float
+
+
+@dataclass(frozen=True, slots=True)
+class Run:
+    """One unbroken stretch during which a state sensor held a single value.
+
+    `duration` is the span between the **first and last observations** of the
+    run. The real transitions happened somewhere in the sampling gaps on either
+    side, so a run is short by up to one sampling interval at each end, and a run
+    seen only once has a duration of zero. Nothing is extrapolated to make those
+    look better.
+
+    `truncated` marks a run whose edge was not an observed transition — the first
+    and last runs in a window, and any run cut by a recording gap. Their
+    durations are lower bounds and should be left out of duration statistics
+    rather than averaged in.
+    """
+
+    starts_at: datetime
+    ends_at: datetime
+    duration: timedelta
+    samples: int
+    asserted: bool
+    truncated: bool
+    started_microseconds: int
+    started_offset_seconds: int
+
+
+@dataclass(frozen=True, slots=True)
+class RunSummary:
+    """How long and how often a signal held one sense."""
+
+    sensor_id: str
+    asserted: bool
+    count: int
+    shortest: timedelta
+    longest: timedelta
+    mean: timedelta
+    total: timedelta
+    truncated: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -486,6 +535,173 @@ def _aggregate_buckets(
     )
 
 
+def runs(
+    connection: sqlite3.Connection,
+    sensor_id: str,
+    *,
+    asserted: bool | None = None,
+    max_gap: timedelta = DEFAULT_RUN_BREAK,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> tuple[Run, ...]:
+    """Split a state sensor's history into unbroken stretches, oldest first.
+
+    A duty cycle says a compressor ran 41% of the time. It cannot tell 22 long
+    cycles from 38 short ones, and short cycling is a fault while long cycling
+    is not. Runs are what separate them.
+
+    `asserted` selects one sense, or both when left as None.
+
+    A gap longer than `max_gap` **ends the run**, even when the value either side
+    is the same. Assuming a signal held across an outage is the same mistake as
+    reading a missing state reading as "off": the recorder was not there, and
+    what happened is unknown.
+    """
+
+    _require_state_sensor(connection, sensor_id, start, end)
+    break_microseconds = max_gap // _MICROSECOND
+    if break_microseconds <= 0:
+        raise ReportingError(f"a run cannot be broken by a gap of {max_gap}")
+
+    observations = _observations(connection, sensor_id, start, end)
+    return tuple(
+        run
+        for run in _detect_runs(observations, break_microseconds)
+        if asserted is None or run.asserted is asserted
+    )
+
+
+def summarize_runs(
+    connection: sqlite3.Connection,
+    sensor_id: str,
+    *,
+    asserted: bool,
+    max_gap: timedelta = DEFAULT_RUN_BREAK,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> RunSummary | None:
+    """Describe how long and how often a signal held one sense."""
+
+    found = runs(
+        connection, sensor_id, asserted=asserted, max_gap=max_gap, start=start, end=end
+    )
+    if not found:
+        return None
+
+    durations = [run.duration for run in found]
+    return RunSummary(
+        sensor_id=sensor_id,
+        asserted=asserted,
+        count=len(found),
+        shortest=min(durations),
+        longest=max(durations),
+        mean=sum(durations, timedelta()) / len(durations),
+        total=sum(durations, timedelta()),
+        truncated=sum(1 for run in found if run.truncated),
+    )
+
+
+def bucketed_runs(
+    connection: sqlite3.Connection,
+    sensor_id: str,
+    *,
+    asserted: bool,
+    interval: timedelta,
+    max_gap: timedelta = DEFAULT_RUN_BREAK,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    local: bool = True,
+) -> tuple[Bucket, ...]:
+    """Group runs into intervals by when each one started.
+
+    The `count` column is the answer to "how many times did it start today", and
+    the value aggregated is each run's duration **in seconds**. `Bucket` carries
+    no unit, so that is stated here and nowhere else can it be guessed.
+
+    Thirty-eight starts a day against twenty-two is what short cycling looks
+    like in a table.
+    """
+
+    bucket_microseconds = _bucket_microseconds(interval)
+    found = runs(
+        connection, sensor_id, asserted=asserted, max_gap=max_gap, start=start, end=end
+    )
+
+    return _aggregate_buckets(
+        (
+            (run.started_microseconds, run.started_offset_seconds, run.duration.total_seconds())
+            for run in found
+        ),
+        bucket_microseconds,
+        local=local,
+    )
+
+
+def _detect_runs(
+    observations: Iterator[tuple[int, int, float]],
+    break_microseconds: int,
+) -> Iterator[Run]:
+    """Walk one sensor's observations and emit each unbroken stretch."""
+
+    building: _BuildingRun | None = None
+
+    for microseconds, offset_seconds, value in observations:
+        if building is None:
+            building = _BuildingRun(value, microseconds, offset_seconds, open_start=True)
+            continue
+
+        if microseconds - building.last_microseconds > break_microseconds:
+            yield building.close(open_end=True)
+            building = _BuildingRun(value, microseconds, offset_seconds, open_start=True)
+        elif value != building.value:
+            yield building.close(open_end=False)
+            building = _BuildingRun(value, microseconds, offset_seconds, open_start=False)
+        else:
+            building.extend(microseconds)
+
+    if building is not None:
+        yield building.close(open_end=True)
+
+
+class _BuildingRun:
+    """A run under construction, closed once its far edge is known."""
+
+    __slots__ = (
+        "value",
+        "first_microseconds",
+        "first_offset_seconds",
+        "last_microseconds",
+        "samples",
+        "open_start",
+    )
+
+    def __init__(
+        self, value: float, microseconds: int, offset_seconds: int, *, open_start: bool
+    ) -> None:
+        self.value = value
+        self.first_microseconds = microseconds
+        self.first_offset_seconds = offset_seconds
+        self.last_microseconds = microseconds
+        self.samples = 1
+        self.open_start = open_start
+
+    def extend(self, microseconds: int) -> None:
+        self.last_microseconds = microseconds
+        self.samples += 1
+
+    def close(self, *, open_end: bool) -> Run:
+        return Run(
+            starts_at=_from_microseconds(self.first_microseconds),
+            ends_at=_from_microseconds(self.last_microseconds),
+            duration=timedelta(microseconds=self.last_microseconds - self.first_microseconds),
+            samples=self.samples,
+            asserted=self.value == 1,
+            truncated=self.open_start or open_end,
+            started_microseconds=self.first_microseconds,
+            started_offset_seconds=self.first_offset_seconds,
+        )
+
+
 def duty_cycle(
     connection: sqlite3.Connection,
     sensor_id: str,
@@ -584,6 +800,23 @@ def _gate(
     if sensor_id is None:
         return None
 
+    _require_state_sensor(connection, sensor_id, start, end)
+
+    return _StateGate(
+        _observations(connection, sensor_id, start, end),
+        tolerance // _MICROSECOND,
+        expected=1 if while_asserted is not None else 0,
+    )
+
+
+def _require_state_sensor(
+    connection: sqlite3.Connection,
+    sensor_id: str,
+    start: datetime | None,
+    end: datetime | None,
+) -> None:
+    """Refuse anything that cannot answer whether something was running."""
+
     units = connection.execute(
         "SELECT DISTINCT unit FROM measurements WHERE sensor_id = ?",
         (sensor_id,),
@@ -602,12 +835,6 @@ def _gate(
             f"{sensor_id} has no observations inside that window, so nothing can be "
             "said about what was running during it"
         )
-
-    return _StateGate(
-        _observations(connection, sensor_id, start, end),
-        tolerance // _MICROSECOND,
-        expected=1 if while_asserted is not None else 0,
-    )
 
 
 def _pairs(

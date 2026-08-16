@@ -63,6 +63,76 @@ For a `state` sensor the mean **is** the duty cycle over that interval, since
 the values are 0 and 1. `--bucket 1d` on a zone call is a day-by-day picture of
 how hard that zone was working.
 
+## Runs: how long, and how often
+
+A duty cycle says the compressor ran 46.5% of the time. It **cannot tell 22 long
+cycles from 96 short ones**, and short cycling is a fault while long cycling is
+not. Runs are what separate them.
+
+```bash
+python3 tools/geopilot_report.py --database geopilot.sqlite3 \
+    --sensor sensor_compressor --runs
+```
+
+```text
+runs   : sensor_compressor asserted
+count  : 182
+shortest: 7m 0s
+longest : 39m 0s
+mean    : 13m 42s
+total   : 1d 17h
+
+1 of these were cut by the window edge or a recording gap; their durations are
+lower bounds
+```
+
+And per day, which is where a trend shows up:
+
+```bash
+python3 tools/geopilot_report.py --database geopilot.sqlite3 \
+    --sensor sensor_compressor --runs --sense on --bucket 1d
+```
+
+```text
+starts at                    count        min        max       mean
+2026-01-12T00:00:00-05:00       16       2340       2340       2340
+2026-01-13T00:00:00-05:00       26       1440       1680       1449
+2026-01-14T00:00:00-05:00       44        780        780        780
+2026-01-15T00:00:00-05:00       96        420        420        420
+
+count is how many runs started; min, max and mean are seconds
+```
+
+Sixteen starts a day becoming ninety-six, with the mean cycle falling from 39
+minutes to 7. Over those same four days the duty cycle sat at 46.5% and never
+moved. **That is what a duty cycle cannot see.**
+
+`--sense on`, `--sense off` or `--sense both` (the default). A bucketed run
+report needs a single sense, because one table cannot hold two series. Each run
+falls in the interval it **started** in, so a cycle spanning midnight belongs to
+the day it began.
+
+`Bucket` carries no unit, so it is said once here: with `--runs`, `count` is how
+many runs started in that interval and the min, max and mean are **seconds**.
+
+### What a run's duration actually is
+
+The span between its **first and last observations**. The real transitions
+happened somewhere in the sampling gaps on either side, so a run is short by up
+to one sampling interval at each end, and a run seen only once has a duration of
+zero. Nothing is extrapolated to make those look tidier.
+
+**A hole longer than `--max-gap` ends the run**, even when the value either side
+is the same. Assuming a signal held across an outage is the same mistake as
+reading a missing state reading as "off" — the recorder was not there, and what
+happened is unknown. The default is five minutes, five missed cycles at the
+documented one-minute poll; raise it if you poll more slowly, or every ordinary
+interval will read as an outage.
+
+Runs at the edge of the window, and runs cut by a gap, are counted as
+**truncated** and reported as such. Their durations are lower bounds and belong
+out of any average, not silently inside one.
+
 ## The loop delta
 
 ```bash
@@ -316,8 +386,12 @@ was below −10", nor to combine two state sensors.
 
 **A gated result says nothing about duration.** "The delta while idle" is not
 "how long it took to recover"; a gate selects moments, it does not measure the
-stretch they belong to. Reading recovery *time* out of these numbers would need
-run-length analysis of the state series, which is not here.
+stretch they belong to. For durations, use `--runs`, which answers a different
+question and is not combined with `--while` or `--minus`.
+
+**Runs describe one signal, not a relationship.** There is no way to ask how the
+loop delta behaved *within* a run, nor to line runs of one sensor up against
+runs of another.
 
 **Its largest gap and its pairing are computed in Python** rather than in SQL.
 The pairing streams both series and holds two rows at a time, so it does not
@@ -359,3 +433,11 @@ For the inverse sense: both gates over one dataset giving 3.0 and 0.1, the two
 senses partitioning the pairs so their counts add to the ungated total, an
 unobserved state admitting nothing to *either* side, both senses at once being
 refused, and the same three validations applying to the inverse gate.
+
+For runs: splitting at every transition, a run spanning first to last
+observation, a single-sample run having no duration, the first and last runs
+being truncated, a long hole ending a run while a short one does not, an
+adjustable threshold, starts counted per interval, a run belonging to the
+interval it started in, and the case that motivates the whole feature — two
+series with an identical duty cycle, one of which is a single run and the other
+twenty.

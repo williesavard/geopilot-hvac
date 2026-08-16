@@ -24,6 +24,10 @@ Answers the questions a recording exists to answer, without a dashboard.
         --sensor sensor_loop_in --minus sensor_loop_out \
         --while-not sensor_compressor --bucket 1d
 
+    # how many times did it start today, and how long did each cycle last?
+    python3 tools/geopilot_report.py --database db.sqlite3 \
+        --sensor sensor_compressor --runs --sense on --bucket 1d
+
 Read-only. It opens the database in read-only mode, so it can run while the
 recorder is still writing and cannot damage what it reads.
 """
@@ -39,14 +43,19 @@ from datetime import UTC, datetime, timedelta
 
 from geopilot.reporting import (
     DEFAULT_PAIRING_TOLERANCE,
+    DEFAULT_RUN_BREAK,
+    Bucket,
     ReportingError,
+    RunSummary,
     bucketed,
     bucketed_delta,
+    bucketed_runs,
     coverage,
     delta,
     duty_cycle,
     open_readonly,
     summarize,
+    summarize_runs,
 )
 
 EXIT_OK = 0
@@ -97,6 +106,25 @@ def build_parser() -> argparse.ArgumentParser:
         dest="while_not_asserted",
         metavar="STATE_SENSOR",
         help="keep only the moments this state sensor read 0, for example a loop recovering",
+    )
+    parser.add_argument(
+        "--runs",
+        action="store_true",
+        help="split --sensor into unbroken stretches instead of averaging it",
+    )
+    parser.add_argument(
+        "--sense",
+        choices=("on", "off", "both"),
+        default="both",
+        help="which runs to report, default both; --bucket needs a single sense",
+    )
+    parser.add_argument(
+        "--max-gap",
+        dest="max_gap",
+        help=(
+            "a hole longer than this ends a run rather than being assumed to have "
+            "held, default 5m"
+        ),
     )
     parser.add_argument(
         "--tolerance",
@@ -190,9 +218,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             if arguments.tolerance
             else DEFAULT_PAIRING_TOLERANCE
         )
+        max_gap = parse_interval(arguments.max_gap) if arguments.max_gap else DEFAULT_RUN_BREAK
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
         return EXIT_USAGE
+
+    if arguments.runs:
+        if not arguments.sensor:
+            print("error: --runs needs --sensor; runs belong to one signal", file=sys.stderr)
+            return EXIT_USAGE
+        if arguments.minus or arguments.while_asserted or arguments.while_not_asserted:
+            print(
+                "error: --runs describes one state sensor on its own; it does not combine "
+                "with --minus or --while",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        if interval is not None and arguments.sense == "both":
+            print(
+                "error: --runs --bucket needs --sense on or --sense off; one table cannot "
+                "hold two series",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
 
     if interval is not None and not arguments.sensor:
         print("error: --bucket needs --sensor; buckets are per sensor", file=sys.stderr)
@@ -214,6 +262,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_USAGE
 
     try:
+        if arguments.runs:
+            return _report_runs(
+                connection,
+                arguments.sensor,
+                sense=arguments.sense,
+                interval=interval,
+                max_gap=max_gap,
+                start=start,
+                end=end,
+                local=not arguments.utc,
+                as_csv=arguments.csv,
+            )
         if interval is not None:
             return _report_buckets(
                 connection,
@@ -415,6 +475,12 @@ def _report_buckets(
         print(f"no measurements for {subject}{_during(gate)} in that window")
         return EXIT_NO_DATA
 
+    return _print_buckets(buckets, as_csv=as_csv)
+
+
+def _print_buckets(
+    buckets: Sequence[Bucket], *, as_csv: bool, footnote: str = ""
+) -> int:
     if as_csv:
         writer = csv.writer(sys.stdout)
         writer.writerow(("starts_at", "count", "min", "max", "mean"))
@@ -437,7 +503,80 @@ def _report_buckets(
             f"{bucket.minimum:>10g} {bucket.maximum:>10g} {bucket.mean:>10.4g}"
         )
     print(f"\n{len(buckets):,} intervals; an absent interval is a gap, not a zero")
+    if footnote:
+        print(footnote)
     return EXIT_OK
+
+
+def _report_runs(
+    connection: sqlite3.Connection,
+    sensor_id: str,
+    *,
+    sense: str,
+    interval: timedelta | None,
+    max_gap: timedelta,
+    start: datetime | None,
+    end: datetime | None,
+    local: bool,
+    as_csv: bool,
+) -> int:
+    if interval is not None:
+        buckets = bucketed_runs(
+            connection,
+            sensor_id,
+            asserted=sense == "on",
+            interval=interval,
+            max_gap=max_gap,
+            start=start,
+            end=end,
+            local=local,
+        )
+        if not buckets:
+            print(f"no {_sense_words(sense == 'on')} runs of {sensor_id} in that window")
+            return EXIT_NO_DATA
+        return _print_buckets(
+            buckets,
+            as_csv=as_csv,
+            footnote="count is how many runs started; min, max and mean are seconds",
+        )
+
+    senses = (True, False) if sense == "both" else (sense == "on",)
+    reported = 0
+    for asserted in senses:
+        summary = summarize_runs(
+            connection,
+            sensor_id,
+            asserted=asserted,
+            max_gap=max_gap,
+            start=start,
+            end=end,
+        )
+        if summary is None:
+            print(f"no {_sense_words(asserted)} runs of {sensor_id} in that window\n")
+            continue
+        _print_run_summary(summary)
+        reported += 1
+
+    return EXIT_OK if reported else EXIT_NO_DATA
+
+
+def _print_run_summary(summary: RunSummary) -> None:
+    print(f"runs   : {summary.sensor_id} {_sense_words(summary.asserted)}")
+    print(f"count  : {summary.count:,}")
+    print(f"shortest: {format_duration(summary.shortest)}")
+    print(f"longest : {format_duration(summary.longest)}")
+    print(f"mean    : {format_duration(summary.mean)}")
+    print(f"total   : {format_duration(summary.total)}")
+    if summary.truncated:
+        print(
+            f"\n{summary.truncated:,} of these were cut by the window edge or a recording "
+            "gap; their durations are lower bounds"
+        )
+    print()
+
+
+def _sense_words(asserted: bool) -> str:
+    return "asserted" if asserted else "idle"
 
 
 if __name__ == "__main__":
