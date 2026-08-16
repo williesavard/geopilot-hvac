@@ -1099,6 +1099,122 @@ def test_gated_delta_buckets_report_the_running_delta(tmp_path: Path) -> None:
     assert (buckets[0].count, buckets[0].mean) == (2, 3.0)
 
 
+def test_the_inverse_gate_keeps_the_idle_moments(tmp_path: Path) -> None:
+    """What the loop does while recovering is a different question from under load."""
+
+    connection = gated_loop(tmp_path, running=(True, True, False, False))
+
+    working = delta(
+        connection,
+        "sensor_loop_in",
+        minus="sensor_loop_out",
+        while_asserted="sensor_compressor",
+    )
+    recovering = delta(
+        connection,
+        "sensor_loop_in",
+        minus="sensor_loop_out",
+        while_not_asserted="sensor_compressor",
+    )
+
+    assert working is not None
+    assert recovering is not None
+    assert working.mean == 3.0
+    assert recovering.mean == pytest.approx(0.1)
+    assert working.count == recovering.count == 2
+    assert working.excluded == recovering.excluded == 2
+
+
+def test_the_two_senses_partition_the_pairs(tmp_path: Path) -> None:
+    connection = gated_loop(tmp_path, running=(True, False, False, True, False))
+
+    ungated = delta(connection, "sensor_loop_in", minus="sensor_loop_out")
+    asserted = delta(
+        connection,
+        "sensor_loop_in",
+        minus="sensor_loop_out",
+        while_asserted="sensor_compressor",
+    )
+    idle = delta(
+        connection,
+        "sensor_loop_in",
+        minus="sensor_loop_out",
+        while_not_asserted="sensor_compressor",
+    )
+
+    assert ungated is not None
+    assert asserted is not None
+    assert idle is not None
+    assert asserted.count + idle.count == ungated.count
+
+
+def test_an_unobserved_state_admits_nothing_in_either_direction(tmp_path: Path) -> None:
+    """A hole in the state record must not be read as idle time."""
+
+    connection = gated_loop(tmp_path, running=(False,), gate_lag=timedelta(seconds=45))
+
+    assert (
+        delta(
+            connection,
+            "sensor_loop_in",
+            minus="sensor_loop_out",
+            while_not_asserted="sensor_compressor",
+        )
+        is None
+    )
+
+
+def test_asking_for_both_senses_at_once_is_refused(tmp_path: Path) -> None:
+    connection = gated_loop(tmp_path, running=(True,))
+
+    with pytest.raises(ReportingError, match="one sense or the other"):
+        delta(
+            connection,
+            "sensor_loop_in",
+            minus="sensor_loop_out",
+            while_asserted="sensor_compressor",
+            while_not_asserted="sensor_compressor",
+        )
+
+
+def test_the_inverse_gate_is_validated_like_the_forward_one(tmp_path: Path) -> None:
+    connection = gated_loop(tmp_path, running=(True,))
+
+    with pytest.raises(ReportingError, match="not state"):
+        summarize(connection, "sensor_loop_in", while_not_asserted="sensor_loop_out")
+
+    with pytest.raises(ReportingError, match="no observations at all"):
+        summarize(connection, "sensor_loop_in", while_not_asserted="sensor_compresor")
+
+
+def test_an_inverse_gated_summary_restricts_the_statistics(tmp_path: Path) -> None:
+    connection = gated_loop(tmp_path, running=(True, False, False))
+
+    summary = summarize(connection, "sensor_loop_out", while_not_asserted="sensor_compressor")
+
+    assert summary is not None
+    assert summary.count == 2
+    assert summary.mean == pytest.approx(1.9)
+    assert summary.excluded == 1
+
+
+def test_inverse_gated_buckets_report_the_recovery(tmp_path: Path) -> None:
+    connection = gated_loop(tmp_path, running=(True, False, True, False))
+
+    buckets = bucketed_delta(
+        connection,
+        "sensor_loop_in",
+        minus="sensor_loop_out",
+        interval=timedelta(hours=1),
+        while_not_asserted="sensor_compressor",
+        local=False,
+    )
+
+    assert len(buckets) == 1
+    assert buckets[0].count == 2
+    assert buckets[0].mean == pytest.approx(0.1)
+
+
 def test_a_report_can_be_produced_while_recording_continues(tmp_path: Path) -> None:
     """WAL permits concurrent readers, which is what makes a live check possible."""
 

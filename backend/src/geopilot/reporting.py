@@ -95,8 +95,8 @@ class DeltaSummary:
     to tell.
 
     `unpaired` counts readings that found no partner. `excluded` counts pairs
-    that were formed and then dropped by a state gate — moments the equipment
-    was not running. The two say different things and are kept apart.
+    that were formed and then dropped by a state gate — moments on the wrong
+    side of the gate's sense. The two say different things and are kept apart.
     """
 
     sensor_id: str
@@ -170,6 +170,7 @@ def summarize(
     sensor_id: str,
     *,
     while_asserted: str | None = None,
+    while_not_asserted: str | None = None,
     tolerance: timedelta = DEFAULT_PAIRING_TOLERANCE,
     start: datetime | None = None,
     end: datetime | None = None,
@@ -185,7 +186,8 @@ def summarize(
     `while_asserted` names a `state` sensor and restricts the summary to the
     moments that sensor was reading 1 — the average loop temperature *while the
     compressor was running*, rather than an average diluted by every hour it was
-    not. See `_StateGate` for what "at that moment" is allowed to mean.
+    not. `while_not_asserted` keeps the opposite moments. See `_StateGate` for
+    what "at that moment" is allowed to mean.
     """
 
     clauses = ["sensor_id = ?"]
@@ -195,7 +197,7 @@ def summarize(
 
     _require_single_unit(connection, sensor_id, where, parameters)
 
-    gate = _gate(connection, while_asserted, tolerance, start, end)
+    gate = _gate(connection, while_asserted, while_not_asserted, tolerance, start, end)
     if gate is not None:
         return _summarize_gated(connection, sensor_id, gate, where, parameters, start, end)
 
@@ -242,7 +244,7 @@ def _summarize_gated(
     values = [
         value
         for microseconds, _, value in _observations(connection, sensor_id, start, end)
-        if gate.is_asserted(microseconds)
+        if gate.admits(microseconds)
     ]
     if not values:
         return None
@@ -264,6 +266,7 @@ def bucketed(
     *,
     interval: timedelta,
     while_asserted: str | None = None,
+    while_not_asserted: str | None = None,
     tolerance: timedelta = DEFAULT_PAIRING_TOLERANCE,
     start: datetime | None = None,
     end: datetime | None = None,
@@ -289,10 +292,11 @@ def bucketed(
     `local=False` for UTC alignment.
 
     `while_asserted` names a `state` sensor and keeps only the observations taken
-    while it read 1. A bucket that holds no such moment does not appear, exactly
-    as an unrecorded interval does not: the equipment being off all afternoon and
-    the recorder being off all afternoon look the same here, and the `count`
-    column beside the neighbouring buckets is what tells them apart.
+    while it read 1; `while_not_asserted` keeps those taken while it read 0. A
+    bucket that holds no such moment does not appear, exactly as an unrecorded
+    interval does not: the equipment being off all afternoon and the recorder
+    being off all afternoon look the same here, and the `count` column beside the
+    neighbouring buckets is what tells them apart.
     """
 
     bucket_microseconds = _bucket_microseconds(interval)
@@ -304,7 +308,7 @@ def bucketed(
 
     _require_single_unit(connection, sensor_id, where, parameters)
 
-    gate = _gate(connection, while_asserted, tolerance, start, end)
+    gate = _gate(connection, while_asserted, while_not_asserted, tolerance, start, end)
     if gate is not None:
         return _aggregate_buckets(
             (
@@ -312,7 +316,7 @@ def bucketed(
                 for microseconds, offset_seconds, value in _observations(
                     connection, sensor_id, start, end
                 )
-                if gate.is_asserted(microseconds)
+                if gate.admits(microseconds)
             ),
             bucket_microseconds,
             local=local,
@@ -352,6 +356,7 @@ def delta(
     *,
     minus: str,
     while_asserted: str | None = None,
+    while_not_asserted: str | None = None,
     tolerance: timedelta = DEFAULT_PAIRING_TOLERANCE,
     start: datetime | None = None,
     end: datetime | None = None,
@@ -367,18 +372,22 @@ def delta(
     it read 1. Without it, a mean delta over a day is diluted by every hour the
     equipment sat idle, and falls when the equipment merely ran less.
 
+    `while_not_asserted` keeps the opposite moments — the loop sitting still
+    rather than working. What that delta does over an idle stretch is a different
+    question from what it does under load, and both are worth asking.
+
     Returns None when no pair could be formed, or when the gate let none through.
     """
 
     unit = _shared_unit(connection, sensor_id, minus, start, end)
-    gate = _gate(connection, while_asserted, tolerance, start, end)
+    gate = _gate(connection, while_asserted, while_not_asserted, tolerance, start, end)
 
     pairs = _pairs(connection, sensor_id, minus, tolerance, start, end)
     paired = 0
     values: list[float] = []
     for microseconds, _, value in pairs:
         paired += 1
-        if gate is None or gate.is_asserted(microseconds):
+        if gate is None or gate.admits(microseconds):
             values.append(value)
 
     if not values:
@@ -405,6 +414,7 @@ def bucketed_delta(
     minus: str,
     interval: timedelta,
     while_asserted: str | None = None,
+    while_not_asserted: str | None = None,
     tolerance: timedelta = DEFAULT_PAIRING_TOLERANCE,
     start: datetime | None = None,
     end: datetime | None = None,
@@ -424,15 +434,16 @@ def bucketed_delta(
     `while_asserted` restricts the pairs to the moments a named `state` sensor
     read 1. That is what turns a daily mean delta from a number diluted by every
     idle hour into one describing the loop while it was actually working.
+    `while_not_asserted` restricts them to the idle moments instead.
     """
 
     bucket_microseconds = _bucket_microseconds(interval)
     _shared_unit(connection, sensor_id, minus, start, end)
-    gate = _gate(connection, while_asserted, tolerance, start, end)
+    gate = _gate(connection, while_asserted, while_not_asserted, tolerance, start, end)
 
     pairs = _pairs(connection, sensor_id, minus, tolerance, start, end)
     if gate is not None:
-        pairs = (triple for triple in pairs if gate.is_asserted(triple[0]))
+        pairs = (triple for triple in pairs if gate.admits(triple[0]))
 
     return _aggregate_buckets(pairs, bucket_microseconds, local=local)
 
@@ -505,25 +516,36 @@ def duty_cycle(
 
 
 class _StateGate:
-    """Answers whether a state signal was asserted at a given instant.
+    """Answers whether a state signal held an expected value at a given instant.
 
     Instants must be asked for in ascending order; the gate only walks forward.
 
     Unlike the delta pairing, a state reading is **not** consumed when used. A
     state is a level, and the same observation legitimately describes every
     moment near it. Reuse cannot inflate any statistic either, because the gate
-    contributes no value — it only answers yes or no. What it will not do is
-    reach further than the tolerance: beyond that the signal is unobserved, and
-    an unobserved state is not an asserted one.
+    contributes no value — it only answers yes or no.
+
+    What it will not do is reach further than the tolerance. Beyond that the
+    signal is unobserved, and **an unobserved state admits nothing, in either
+    direction.** That matters most for the inverted gate: it would be easy, and
+    wrong, to read "no reading here" as "it was off", which would quietly count
+    every hole in the state record as idle time.
     """
 
-    def __init__(self, observations: Iterator[tuple[int, int, float]], tolerance: int) -> None:
+    def __init__(
+        self,
+        observations: Iterator[tuple[int, int, float]],
+        tolerance: int,
+        *,
+        expected: float,
+    ) -> None:
         self._observations = observations
         self._tolerance = tolerance
+        self._expected = expected
         self._current = next(observations, None)
         self._upcoming = next(observations, None)
 
-    def is_asserted(self, microseconds: int) -> bool:
+    def admits(self, microseconds: int) -> bool:
         while self._upcoming is not None and self._current is not None:
             if abs(self._upcoming[0] - microseconds) >= abs(self._current[0] - microseconds):
                 break
@@ -533,43 +555,58 @@ class _StateGate:
             return False
         if abs(self._current[0] - microseconds) > self._tolerance:
             return False
-        return self._current[2] == 1
+        return self._current[2] == self._expected
 
 
 def _gate(
     connection: sqlite3.Connection,
     while_asserted: str | None,
+    while_not_asserted: str | None,
     tolerance: timedelta,
     start: datetime | None,
     end: datetime | None,
 ) -> _StateGate | None:
-    """Build a gate from a state sensor, refusing anything that cannot be one."""
+    """Build a gate from a state sensor, refusing anything that cannot be one.
 
-    if while_asserted is None:
+    `while_asserted` keeps the moments the signal read 1; `while_not_asserted`
+    keeps the moments it read 0 — the loop recovering between cycles rather than
+    working. They are separate arguments rather than a flag, so a call site says
+    which sense it means without anyone having to remember what `True` meant.
+    """
+
+    if while_asserted is not None and while_not_asserted is not None:
+        raise ReportingError(
+            "a report is gated on one sense or the other, not both; asking for the "
+            "moments a signal was on and off at once selects nothing"
+        )
+
+    sensor_id = while_asserted if while_asserted is not None else while_not_asserted
+    if sensor_id is None:
         return None
 
     units = connection.execute(
         "SELECT DISTINCT unit FROM measurements WHERE sensor_id = ?",
-        (while_asserted,),
+        (sensor_id,),
     ).fetchall()
 
     if not units:
-        raise ReportingError(f"{while_asserted} has no observations at all; check the name")
+        raise ReportingError(f"{sensor_id} has no observations at all; check the name")
     if [str(unit) for (unit,) in units] != [STATE_UNIT]:
         spellings = ", ".join(sorted(str(unit) for (unit,) in units))
         raise ReportingError(
-            f"{while_asserted} is recorded in {spellings}, not {STATE_UNIT}; only a state "
+            f"{sensor_id} is recorded in {spellings}, not {STATE_UNIT}; only a state "
             "sensor can say whether something was running"
         )
-    if not _sample_count(connection, while_asserted, start, end):
+    if not _sample_count(connection, sensor_id, start, end):
         raise ReportingError(
-            f"{while_asserted} has no observations inside that window, so nothing can be "
+            f"{sensor_id} has no observations inside that window, so nothing can be "
             "said about what was running during it"
         )
 
     return _StateGate(
-        _observations(connection, while_asserted, start, end),
+        _observations(connection, sensor_id, start, end),
         tolerance // _MICROSECOND,
+        expected=1 if while_asserted is not None else 0,
     )
 
 
