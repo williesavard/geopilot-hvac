@@ -223,6 +223,13 @@ button[aria-pressed="true"] {
   font-weight: 600;
 }
 
+/* A control that cannot act must not look like one that can. */
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  border-style: dashed;
+}
+
 .readout {
   min-height: 1.3rem;
   color: var(--ink-soft);

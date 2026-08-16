@@ -69,8 +69,15 @@ def render(
     deltas: tuple[DeltaPair, ...] = (),
     while_asserted: str | None = None,
     generated_at: datetime | None = None,
+    control_token: str | None = None,
 ) -> str:
-    """Build the page. Returns HTML; writes nothing."""
+    """Build the page. Returns HTML; writes nothing.
+
+    `control_token` turns the page into a control surface. Without it — the
+    static file written by `tools/geopilot_dashboard.py` — the controls are not
+    merely hidden, they are **not rendered at all**, because a file has no back
+    channel and a button that cannot work is worse than no button.
+    """
 
     sensors = coverage(connection)
     if not sensors:
@@ -78,6 +85,9 @@ def render(
 
     panels: dict[str, dict[str, Any]] = {}
     sections: list[str] = []
+
+    if control_token is not None:
+        sections.append(_control_section())
 
     sections.append(_health_section(sensors))
 
@@ -122,8 +132,32 @@ def render(
         title=title,
         subtitle=_subtitle(sensors, generated_at),
         sections=sections,
-        payload={"panels": panels},
+        payload={"panels": panels, "controlToken": control_token},
+        control=control_token is not None,
     )
+
+
+def _control_section() -> str:
+    """The control surface, filled in by the browser from /api/state.
+
+    Deliberately empty in the markup. The state of a relay is read back from the
+    bus when the page asks, never baked into a document that starts going stale
+    the moment it is written.
+    """
+
+    return """
+<h2>Control</h2>
+<p class="subtitle">What GeoPilot is permitted to operate, and what the bus says
+those relays are actually doing right now.</p>
+<div class="card" id="control">
+  <p class="note">reading the bus…</p>
+</div>
+<p class="caveat">Every state shown here was read back from the equipment, never
+remembered from what was last commanded — a controller that believes its own
+intentions cannot notice a contact that did not move. Commands are refused
+unless control is enabled in the configuration, the relay is on the whitelist,
+and it has rested long enough. Every attempt is recorded, refusals included.</p>
+"""
 
 
 def _health_section(sensors: tuple[Any, ...]) -> str:
@@ -379,10 +413,24 @@ def _escape(value: str) -> str:
     )
 
 
-def _page(*, title: str, subtitle: str, sections: list[str], payload: dict[str, Any]) -> str:
+def _page(
+    *,
+    title: str,
+    subtitle: str,
+    sections: list[str],
+    payload: dict[str, Any],
+    control: bool = False,
+) -> str:
     # `</` is split so a sensor named like a closing tag cannot end the script
     # block early. The data is JSON, but it lands inside HTML.
     embedded = json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
+    control_script = f"<script>\n{_asset('control.js')}\n</script>" if control else ""
+    control_note = (
+        "<p>The controls read the state of each relay back from the equipment "
+        "every few seconds. Nothing on this page acts without being pressed.</p>"
+        if control
+        else ""
+    )
 
     return f"""<!doctype html>
 <html lang="en">
@@ -404,12 +452,14 @@ def _page(*, title: str, subtitle: str, sections: list[str], payload: dict[str, 
 here describes what was recorded; none of them says why it happened.</p>
 <p>Times are shown in the wall clock that was in effect where the readings were
 taken.</p>
+{control_note}
 </footer>
 </main>
 <script>window.GEOPILOT={embedded};</script>
 <script>
 {_asset("dashboard.js")}
 </script>
+{control_script}
 </body>
 </html>
 """

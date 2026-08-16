@@ -9,11 +9,12 @@ the file, opens no serial port, and touches no database.
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from geopilot.control import ControlPolicy, ControlTarget
 from geopilot.domain import (
     Equipment,
     EquipmentType,
@@ -29,6 +30,15 @@ from geopilot.onewire import DEFAULT_SYSFS_ROOT
 from geopilot.register_decoder import RegisterDataType
 
 CONFIGURATION_VERSION = 1
+
+DEFAULT_MINIMUM_INTERVAL_SECONDS = 300.0
+"""How long a relay must rest between commands unless a target says otherwise.
+
+Five minutes. A configuration that forgets to state an interval gets the
+conservative one, never an unlimited one: relay chatter is how contactors weld
+and compressors die. Being too slow is an inconvenience; being too fast is a
+repair bill.
+"""
 
 
 class ConfigurationError(ValueError):
@@ -108,6 +118,18 @@ class RegisterReadConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ControlTargetConfig:
+    """One relay, and the bus it is reached on.
+
+    `ControlTarget` describes the relay; this adds the source, because the guard
+    deliberately knows nothing about ports and something has to.
+    """
+
+    target: ControlTarget
+    source_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class InstallationConfig:
     """A complete, validated installation description."""
 
@@ -122,6 +144,16 @@ class InstallationConfig:
     onewire_sources: tuple[OneWireSourceConfig, ...] = ()
     onewire_reads: tuple[OneWireReadConfig, ...] = ()
     bit_reads: tuple[BitReadConfig, ...] = ()
+    control: ControlPolicy = field(default_factory=ControlPolicy)
+    control_sources: tuple[ControlTargetConfig, ...] = ()
+
+    def control_source(self, target_id: str) -> str:
+        """Return the source a control target is reached on."""
+
+        for candidate in self.control_sources:
+            if candidate.target.target_id == target_id:
+                return candidate.source_id
+        raise ConfigurationError(f"unknown control target: {target_id}")
 
     def source(self, source_id: str) -> SerialSourceConfig:
         """Return one source by id."""
@@ -288,6 +320,35 @@ def parse_configuration(
     )
     _require_unique(tuple(item.read_id for item in bit_reads), "bit read id")
 
+    control_sources = tuple(
+        ControlTargetConfig(
+            target=ControlTarget(
+                target_id=_require_text(entry, "id"),
+                unit_id=_require_int(entry, "unit_id", minimum=0),
+                address=_require_int(entry, "address", minimum=0),
+                minimum_interval_seconds=_optional_number(
+                    entry, "minimum_interval_seconds", DEFAULT_MINIMUM_INTERVAL_SECONDS
+                ),
+                description=_optional_text(entry, "description", ""),
+            ),
+            source_id=_require_text(entry, "source_id"),
+        )
+        for entry in _require_array(document, "control_target")
+    )
+    _require_unique(
+        tuple(item.target.target_id for item in control_sources), "control target id"
+    )
+
+    control_table = document.get("control")
+    if control_table is not None and not isinstance(control_table, dict):
+        raise ConfigurationError("control must be a table")
+    control = ControlPolicy(
+        enabled=_optional_bool(control_table or {}, "enabled", False),
+        targets=tuple(item.target for item in control_sources),
+    )
+
+    _validate_control_references(control_sources, sources)
+
     _validate_references(
         systems,
         equipment,
@@ -312,7 +373,27 @@ def parse_configuration(
         onewire_sources=onewire_sources,
         onewire_reads=onewire_reads,
         bit_reads=bit_reads,
+        control=control,
+        control_sources=control_sources,
     )
+
+
+def _validate_control_references(
+    control_sources: tuple[ControlTargetConfig, ...],
+    sources: tuple[SerialSourceConfig, ...],
+) -> None:
+    """Refuse a relay on a bus that does not exist.
+
+    A control target pointing at a missing source would only be discovered when
+    somebody pressed the button, which is the worst possible moment.
+    """
+
+    serial_ids = {item.source_id for item in sources}
+    for entry in control_sources:
+        if entry.source_id not in serial_ids:
+            raise ConfigurationError(
+                f"control target {entry.target.target_id} names unknown source: {entry.source_id}"
+            )
 
 
 def _validate_bit_references(
