@@ -174,5 +174,7 @@ Accept when a reviewer confirms:
 1. `feature/modbus-write-transport` — `ModbusWriteTransport`, function code
    `0x05`, structured errors, fake transport, no runtime wiring.
 2. ~~`feature/command-guard`~~ — done; see `docs/COMMAND_GUARD.md`.
-3. Read zone call signals through Modbus digital inputs, still read-only.
+3. Read zone call signals through Modbus digital inputs, still read-only. The
+   transport exists; see `docs/MODBUS_BIT_BOUNDARY.md`. Ingestion is blocked on a
+   domain decision, because GeoPilot has no representation for a discrete state.
 4. Revisit anticipatory control only after a heating season of data exists.

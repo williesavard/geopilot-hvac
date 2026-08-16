@@ -14,12 +14,16 @@ from datetime import UTC, datetime
 from typing import Any, Protocol, cast
 
 from geopilot.modbus_transport import (
+    ModbusBitKind,
+    ModbusBitReadRequest,
+    ModbusBitReadResponse,
     ModbusReadRequest,
     ModbusReadResponse,
     ModbusRegisterKind,
     ModbusTransportBoundaryError,
     ModbusTransportError,
     ModbusTransportErrorCode,
+    unpack_bits,
 )
 
 
@@ -336,3 +340,169 @@ def _require_positive_int(value: int, field_name: str) -> None:
         raise ModbusTransportBoundaryError(f"{field_name} must be an integer")
     if value <= 0:
         raise ModbusTransportBoundaryError(f"{field_name} must be positive")
+
+
+READ_COILS = 0x01
+READ_DISCRETE_INPUTS = 0x02
+
+
+class PySerialModbusBitTransport:
+    """Read discrete inputs and coils over a real serial port.
+
+    Accepts an already-open serial port so it can share one physical bus with
+    the register transport, rather than opening a second port on the same
+    device.
+    """
+
+    def __init__(
+        self,
+        config: PySerialModbusConfig,
+        *,
+        serial_port: SerialPort | None = None,
+        serial_factory: SerialFactory | None = None,
+        clock: TransportClock = _utc_now,
+    ) -> None:
+        self._config = config
+        self._clock = clock
+        if serial_port is not None:
+            self._serial = serial_port
+        else:
+            self._serial = open_serial_port(config, serial_factory=serial_factory)
+
+    def read_bits(self, request: ModbusBitReadRequest) -> ModbusBitReadResponse:
+        """Read a run of bits and unpack them."""
+
+        function_code = _bit_function_code(request.bit_kind)
+        frame = build_bit_read_frame(request)
+
+        try:
+            written = self._serial.write(frame)
+        except Exception as exc:
+            raise _bit_error(
+                ModbusTransportErrorCode.CONNECTION_FAILED,
+                "serial write failed",
+                request,
+            ) from exc
+
+        if written is not None and written != len(frame):
+            raise _bit_error(
+                ModbusTransportErrorCode.CONNECTION_FAILED,
+                f"serial write was incomplete: {written} of {len(frame)} bytes",
+                request,
+            )
+
+        header = self._read_exact_bits(3, request)
+        response_unit, response_function, payload_length_or_code = header
+
+        if response_unit != request.unit_id:
+            raise _bit_error(
+                ModbusTransportErrorCode.INVALID_RESPONSE,
+                f"expected unit {request.unit_id}, received {response_unit}",
+                request,
+            )
+
+        if response_function == function_code | 0x80:
+            crc_bytes = self._read_exact_bits(2, request)
+            _require_valid_crc(header + crc_bytes, _as_read_request(request))
+            raise _bit_error(
+                _error_code_from_exception_code(payload_length_or_code),
+                f"Modbus exception response: {payload_length_or_code}",
+                request,
+            )
+
+        if response_function != function_code:
+            raise _bit_error(
+                ModbusTransportErrorCode.INVALID_RESPONSE,
+                f"expected function {function_code}, received {response_function}",
+                request,
+            )
+
+        expected_bytes = (request.quantity + 7) // 8
+        if payload_length_or_code != expected_bytes:
+            raise _bit_error(
+                ModbusTransportErrorCode.INVALID_RESPONSE,
+                f"expected {expected_bytes} data byte(s), received {payload_length_or_code}",
+                request,
+            )
+
+        payload_and_crc = self._read_exact_bits(payload_length_or_code + 2, request)
+        _require_valid_crc(header + payload_and_crc, _as_read_request(request))
+
+        return ModbusBitReadResponse(
+            request_id=request.request_id,
+            bits=unpack_bits(payload_and_crc[:payload_length_or_code], request.quantity),
+            observed_at=self._clock(),
+        )
+
+    def _read_exact_bits(self, size: int, request: ModbusBitReadRequest) -> bytes:
+        try:
+            data = self._serial.read(size)
+        except Exception as exc:
+            raise _bit_error(
+                ModbusTransportErrorCode.CONNECTION_FAILED,
+                "serial read failed",
+                request,
+            ) from exc
+
+        if data == b"":
+            raise _bit_error(
+                ModbusTransportErrorCode.TIMEOUT,
+                f"timed out reading {size} byte(s)",
+                request,
+            )
+        if len(data) != size:
+            raise _bit_error(
+                ModbusTransportErrorCode.INVALID_RESPONSE,
+                f"expected {size} byte(s), received {len(data)}",
+                request,
+            )
+        return data
+
+
+def build_bit_read_frame(request: ModbusBitReadRequest) -> bytes:
+    """Build a Modbus RTU bit read frame, for tests and diagnostics."""
+
+    body = bytes(
+        (
+            request.unit_id,
+            _bit_function_code(request.bit_kind),
+            (request.address >> 8) & 0xFF,
+            request.address & 0xFF,
+            (request.quantity >> 8) & 0xFF,
+            request.quantity & 0xFF,
+        )
+    )
+    return _append_crc(body)
+
+
+def _bit_function_code(bit_kind: ModbusBitKind) -> int:
+    match bit_kind:
+        case ModbusBitKind.COIL:
+            return READ_COILS
+        case ModbusBitKind.DISCRETE_INPUT:
+            return READ_DISCRETE_INPUTS
+
+
+def _as_read_request(request: ModbusBitReadRequest) -> ModbusReadRequest:
+    """Adapt a bit request for helpers that report against a read request."""
+
+    return ModbusReadRequest(
+        request_id=request.request_id,
+        source_id=request.source_id,
+        unit_id=request.unit_id,
+        register_kind=ModbusRegisterKind.HOLDING,
+        address=request.address,
+        quantity=1,
+    )
+
+
+def _bit_error(
+    code: ModbusTransportErrorCode,
+    message: str,
+    request: ModbusBitReadRequest,
+) -> ModbusTransportError:
+    return ModbusTransportError(
+        code=code,
+        message=message,
+        request_id=request.request_id,
+    )
