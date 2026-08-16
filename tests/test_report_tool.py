@@ -254,6 +254,188 @@ def test_bucketing_an_unknown_sensor_reports_no_data(
     assert "no measurements for sensor_absent" in capsys.readouterr().out
 
 
+def loop_database(tmp_path: Path, *, lag_seconds: int = 3) -> Path:
+    """Loop-in and loop-out, read seconds apart, delta of exactly 3 degrees."""
+
+    database = tmp_path / "loop.sqlite3"
+    with SqliteMeasurementHistorian(database) as historian:
+        for index in range(3):
+            moment = START + timedelta(minutes=index)
+            for sensor_id, value, offset in (
+                ("sensor_loop_in", 2.0, timedelta()),
+                ("sensor_loop_out", -1.0, timedelta(seconds=lag_seconds)),
+            ):
+                stamped = moment + offset
+                historian.append(
+                    Measurement(
+                        id=f"source_bus:{sensor_id}:{index}",
+                        sensor_id=sensor_id,
+                        observed_at=stamped,
+                        received_at=stamped,
+                        value=value,
+                        unit="degC",
+                        quality=DataQuality.GOOD,
+                        source_id="source_bus",
+                    )
+                )
+    return database
+
+
+def test_a_delta_is_printed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    database = loop_database(tmp_path)
+
+    exit_code = main(
+        [
+            "--database",
+            str(database),
+            "--sensor",
+            "sensor_loop_in",
+            "--minus",
+            "sensor_loop_out",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == EXIT_OK
+    assert "delta  : sensor_loop_in minus sensor_loop_out" in output
+    assert "pairs  : 3" in output
+    assert "mean   : 3" in output
+    assert "unpaired" not in output
+
+
+def test_unpaired_readings_are_surfaced(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Three readings each, but only the first pair is inside a 5-second reach."""
+
+    database = tmp_path / "ragged.sqlite3"
+    lags = (timedelta(seconds=2), timedelta(seconds=40), timedelta(seconds=40))
+    with SqliteMeasurementHistorian(database) as historian:
+        for index, lag in enumerate(lags):
+            moment = START + timedelta(minutes=index)
+            for sensor_id, value, offset in (
+                ("sensor_loop_in", 2.0, timedelta()),
+                ("sensor_loop_out", -1.0, lag),
+            ):
+                stamped = moment + offset
+                historian.append(
+                    Measurement(
+                        id=f"source_bus:{sensor_id}:{index}",
+                        sensor_id=sensor_id,
+                        observed_at=stamped,
+                        received_at=stamped,
+                        value=value,
+                        unit="degC",
+                        quality=DataQuality.GOOD,
+                        source_id="source_bus",
+                    )
+                )
+
+    exit_code = main(
+        [
+            "--database",
+            str(database),
+            "--sensor",
+            "sensor_loop_in",
+            "--minus",
+            "sensor_loop_out",
+            "--tolerance",
+            "5s",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == EXIT_OK
+    assert "pairs  : 1" in output
+    assert "unpaired: 2 of sensor_loop_in, 2 of sensor_loop_out" in output
+
+
+def test_no_pair_at_all_reports_no_data(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = loop_database(tmp_path, lag_seconds=20)
+
+    exit_code = main(
+        [
+            "--database",
+            str(database),
+            "--sensor",
+            "sensor_loop_in",
+            "--minus",
+            "sensor_loop_out",
+            "--tolerance",
+            "5s",
+        ]
+    )
+
+    assert exit_code == EXIT_NO_DATA
+    assert "no paired readings" in capsys.readouterr().out
+
+
+def test_a_delta_can_be_bucketed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    database = loop_database(tmp_path)
+
+    exit_code = main(
+        [
+            "--database",
+            str(database),
+            "--sensor",
+            "sensor_loop_in",
+            "--minus",
+            "sensor_loop_out",
+            "--bucket",
+            "1h",
+            "--utc",
+            "--csv",
+        ]
+    )
+
+    lines = capsys.readouterr().out.splitlines()
+    assert exit_code == EXIT_OK
+    assert lines[1] == "2026-01-01T00:00:00+00:00,3,3.0,3.0,3.0"
+
+
+def test_a_delta_without_a_sensor_is_a_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = loop_database(tmp_path)
+
+    exit_code = main(["--database", str(database), "--minus", "sensor_loop_out"])
+
+    assert exit_code == EXIT_USAGE
+    assert "--minus needs --sensor" in capsys.readouterr().err
+
+
+def test_comparing_incompatible_sensors_is_a_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "mixed.sqlite3"
+    with SqliteMeasurementHistorian(database) as historian:
+        for index, (sensor_id, value, unit) in enumerate(
+            (("sensor_loop_in", 2.0, "degC"), ("sensor_zone_1", 1, "state"))
+        ):
+            moment = START + timedelta(seconds=index)
+            historian.append(
+                Measurement(
+                    id=f"source_bus:{sensor_id}:{index}",
+                    sensor_id=sensor_id,
+                    observed_at=moment,
+                    received_at=moment,
+                    value=value,
+                    unit=unit,
+                    quality=DataQuality.GOOD,
+                    source_id="source_bus",
+                )
+            )
+
+    exit_code = main(
+        ["--database", str(database), "--sensor", "sensor_loop_in", "--minus", "sensor_zone_1"]
+    )
+
+    assert exit_code == EXIT_USAGE
+    assert "not recorded in the same unit" in capsys.readouterr().err
+
+
 def test_intervals_are_parsed_from_their_unit() -> None:
     assert parse_interval("30s") == timedelta(seconds=30)
     assert parse_interval("15m") == timedelta(minutes=15)
