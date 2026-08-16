@@ -834,6 +834,268 @@ def test_delta_buckets_without_pairs_are_empty(tmp_path: Path) -> None:
     )
 
 
+def gated_loop(
+    tmp_path: Path,
+    *,
+    running: tuple[bool, ...],
+    gate_unit: str = "state",
+    gate_lag: timedelta = timedelta(seconds=6),
+) -> sqlite3.Connection:
+    """A loop whose delta is 3.0 while running and 0.1 while idle.
+
+    The three sensors are stamped seconds apart, as a real acquisition cycle
+    stamps them, so nothing here lines up on an exact instant.
+    """
+
+    measurements = []
+    for index, is_running in enumerate(running):
+        moment = START + timedelta(minutes=index)
+        spread = 3.0 if is_running else 0.1
+        measurements.append(
+            measurement(index=index, sensor_id="sensor_loop_in", value=2.0, observed_at=moment)
+        )
+        measurements.append(
+            measurement(
+                index=index,
+                sensor_id="sensor_loop_out",
+                value=2.0 - spread,
+                observed_at=moment + timedelta(seconds=3),
+            )
+        )
+        measurements.append(
+            measurement(
+                index=index,
+                sensor_id="sensor_compressor",
+                value=1 if is_running else 0,
+                unit=gate_unit,
+                observed_at=moment + gate_lag,
+            )
+        )
+    return recorded(tmp_path, measurements)
+
+
+def test_a_gated_delta_describes_only_the_running_moments(tmp_path: Path) -> None:
+    """Ungated, the mean is diluted by every idle hour. That is the whole point."""
+
+    connection = gated_loop(tmp_path, running=(True, True, False, False))
+
+    ungated = delta(connection, "sensor_loop_in", minus="sensor_loop_out")
+    gated = delta(
+        connection,
+        "sensor_loop_in",
+        minus="sensor_loop_out",
+        while_asserted="sensor_compressor",
+    )
+
+    assert ungated is not None
+    assert gated is not None
+    assert ungated.mean == 1.55
+    assert gated.mean == 3.0
+    assert gated.count == 2
+
+
+def test_a_gated_delta_counts_what_it_dropped(tmp_path: Path) -> None:
+    """Excluded and unpaired say different things and are kept apart."""
+
+    connection = gated_loop(tmp_path, running=(True, False, False, False))
+
+    gated = delta(
+        connection,
+        "sensor_loop_in",
+        minus="sensor_loop_out",
+        while_asserted="sensor_compressor",
+    )
+
+    assert gated is not None
+    assert (gated.count, gated.excluded, gated.unpaired) == (1, 3, 0)
+
+
+def test_an_ungated_result_reports_nothing_excluded(tmp_path: Path) -> None:
+    connection = gated_loop(tmp_path, running=(True, False))
+
+    summary = delta(connection, "sensor_loop_in", minus="sensor_loop_out")
+
+    assert summary is not None
+    assert summary.excluded == 0
+
+
+def test_a_gate_that_never_asserts_yields_no_result(tmp_path: Path) -> None:
+    connection = gated_loop(tmp_path, running=(False, False))
+
+    assert (
+        delta(
+            connection,
+            "sensor_loop_in",
+            minus="sensor_loop_out",
+            while_asserted="sensor_compressor",
+        )
+        is None
+    )
+
+
+def test_a_state_reading_is_reused_rather_than_consumed(tmp_path: Path) -> None:
+    """A state is a level: one reading legitimately describes every moment near it."""
+
+    measurements = [
+        measurement(
+            index=index,
+            sensor_id="sensor_loop_in",
+            value=float(index),
+            observed_at=START + timedelta(seconds=index),
+        )
+        for index in range(4)
+    ]
+    measurements.append(
+        measurement(
+            index=0,
+            sensor_id="sensor_compressor",
+            value=1,
+            unit="state",
+            observed_at=START + timedelta(seconds=2),
+        )
+    )
+
+    summary = summarize(
+        recorded(tmp_path, measurements),
+        "sensor_loop_in",
+        while_asserted="sensor_compressor",
+    )
+
+    assert summary is not None
+    assert summary.count == 4
+
+
+def test_a_gate_does_not_reach_beyond_its_tolerance(tmp_path: Path) -> None:
+    """Beyond the tolerance the signal is unobserved, and unobserved is not asserted."""
+
+    connection = gated_loop(tmp_path, running=(True,), gate_lag=timedelta(seconds=45))
+
+    assert (
+        delta(
+            connection,
+            "sensor_loop_in",
+            minus="sensor_loop_out",
+            while_asserted="sensor_compressor",
+        )
+        is None
+    )
+
+    assert (
+        delta(
+            connection,
+            "sensor_loop_in",
+            minus="sensor_loop_out",
+            while_asserted="sensor_compressor",
+            tolerance=timedelta(minutes=1),
+        )
+        is not None
+    )
+
+
+def test_gating_on_a_sensor_that_is_not_a_state_is_refused(tmp_path: Path) -> None:
+    connection = gated_loop(tmp_path, running=(True,))
+
+    with pytest.raises(ReportingError, match="not state"):
+        delta(
+            connection,
+            "sensor_loop_in",
+            minus="sensor_loop_out",
+            while_asserted="sensor_loop_out",
+        )
+
+
+def test_gating_on_an_unknown_sensor_is_refused(tmp_path: Path) -> None:
+    """A typo must not quietly look like an installation that never ran."""
+
+    connection = gated_loop(tmp_path, running=(True,))
+
+    with pytest.raises(ReportingError, match="no observations at all"):
+        delta(
+            connection,
+            "sensor_loop_in",
+            minus="sensor_loop_out",
+            while_asserted="sensor_compresor",
+        )
+
+
+def test_gating_on_a_sensor_absent_from_the_window_is_refused(tmp_path: Path) -> None:
+    connection = gated_loop(tmp_path, running=(True, True))
+
+    with pytest.raises(ReportingError, match="inside that window"):
+        delta(
+            connection,
+            "sensor_loop_in",
+            minus="sensor_loop_out",
+            while_asserted="sensor_compressor",
+            start=START + timedelta(days=1),
+        )
+
+
+def test_a_gated_summary_restricts_the_statistics(tmp_path: Path) -> None:
+    connection = gated_loop(tmp_path, running=(True, True, False, False))
+
+    summary = summarize(connection, "sensor_loop_out", while_asserted="sensor_compressor")
+
+    assert summary is not None
+    assert (summary.count, summary.mean, summary.excluded) == (2, -1.0, 2)
+
+
+def test_a_gated_summary_of_nothing_is_none(tmp_path: Path) -> None:
+    connection = gated_loop(tmp_path, running=(False, False))
+
+    assert summarize(connection, "sensor_loop_out", while_asserted="sensor_compressor") is None
+
+
+def test_gated_buckets_keep_only_the_running_moments(tmp_path: Path) -> None:
+    connection = gated_loop(tmp_path, running=(True, False, True, False))
+
+    buckets = bucketed(
+        connection,
+        "sensor_loop_out",
+        interval=timedelta(hours=1),
+        while_asserted="sensor_compressor",
+        local=False,
+    )
+
+    assert len(buckets) == 1
+    assert buckets[0].count == 2
+    assert buckets[0].mean == -1.0
+
+
+def test_a_bucket_with_no_running_moment_is_absent(tmp_path: Path) -> None:
+    """Equipment off all afternoon and recorder off all afternoon look the same."""
+
+    running = (True,) + (False,) * 60 + (True,)
+    connection = gated_loop(tmp_path, running=running)
+
+    buckets = bucketed(
+        connection,
+        "sensor_loop_out",
+        interval=timedelta(hours=1),
+        while_asserted="sensor_compressor",
+        local=False,
+    )
+
+    assert [bucket.count for bucket in buckets] == [1, 1]
+    assert buckets[1].starts_at == START + timedelta(hours=1)
+
+
+def test_gated_delta_buckets_report_the_running_delta(tmp_path: Path) -> None:
+    connection = gated_loop(tmp_path, running=(True, False, True, False))
+
+    buckets = bucketed_delta(
+        connection,
+        "sensor_loop_in",
+        minus="sensor_loop_out",
+        interval=timedelta(hours=1),
+        while_asserted="sensor_compressor",
+        local=False,
+    )
+
+    assert len(buckets) == 1
+    assert (buckets[0].count, buckets[0].mean) == (2, 3.0)
+
+
 def test_a_report_can_be_produced_while_recording_continues(tmp_path: Path) -> None:
     """WAL permits concurrent readers, which is what makes a live check possible."""
 
