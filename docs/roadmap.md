@@ -75,6 +75,7 @@ rules and first tested code path.
 - `docs/CONTROL_BOUNDARY_ADR.md`
 - `docs/MODBUS_WRITE_BOUNDARY.md`
 - `docs/COMMAND_GUARD.md`
+- `docs/MODBUS_BIT_BOUNDARY.md`
 - `docs/MEASUREMENT_ID_ADR.md`
 - `docs/MODBUS_SMOKE_TOOL.md`
 - `docs/hardware.md`
