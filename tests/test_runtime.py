@@ -391,3 +391,125 @@ def test_a_probe_failure_is_a_structured_failure_not_a_crash(tmp_path: Path) -> 
         assert outcome.report.success_count == 1
         assert outcome.report.failure_count == 1
         assert session.historian.count() == 1
+
+
+def bits_document(database: Path) -> dict[str, Any]:
+    """A configuration with a Modbus register read and a zone call bit."""
+
+    payload = document(database)
+    payload["sensor"].append(
+        {
+            "id": "sensor_zone_1_call",
+            "equipment_id": "equipment_hp",
+            "name": "Zone 1 call",
+            "measurement_kind": "state",
+            "sensor_kind": "state",
+            "unit": "state",
+            "source_id": "source_bus",
+        }
+    )
+    payload["bit_read"] = [
+        {
+            "id": "read_zone_1",
+            "source_id": "source_bus",
+            "sensor_id": "sensor_zone_1_call",
+            "unit_id": 2,
+            "bit": "discrete_input",
+            "address": 0,
+            "source_reference": "relay panel mapping",
+        }
+    ]
+    return payload
+
+
+class FakeBitTransport:
+    def __init__(self, asserted: bool = True, error: Exception | None = None) -> None:
+        self._asserted = asserted
+        self._error = error
+        self.calls = 0
+
+    def read_bits(self, request: Any) -> Any:
+        from geopilot.modbus_transport import ModbusBitReadResponse
+
+        self.calls += 1
+        if self._error is not None:
+            raise self._error
+        return ModbusBitReadResponse(
+            request_id=request.request_id,
+            bits=(self._asserted,),
+            observed_at=STAMP,
+        )
+
+
+def bits_session(
+    tmp_path: Path,
+    bit_transport: FakeBitTransport,
+    *,
+    inverted: bool = False,
+) -> AcquisitionSession:
+    payload = bits_document(tmp_path / "db.sqlite3")
+    payload["bit_read"][0]["inverted"] = inverted
+    return AcquisitionSession(
+        parse_configuration(payload, created_at=STAMP),
+        transport_factory=lambda _source: FakeTransport(),
+        bit_transport_factory=lambda _source: bit_transport,
+        clock=lambda: STAMP,
+    )
+
+
+def test_an_asserted_zone_call_is_stored_as_one(tmp_path: Path) -> None:
+    with bits_session(tmp_path, FakeBitTransport(asserted=True)) as session:
+        session.run_cycle()
+
+        by_sensor = {item.sensor_id: item.value for item in session.historian.all()}
+        assert by_sensor["sensor_zone_1_call"] == 1
+
+
+def test_an_idle_zone_call_is_stored_as_zero(tmp_path: Path) -> None:
+    with bits_session(tmp_path, FakeBitTransport(asserted=False)) as session:
+        session.run_cycle()
+
+        by_sensor = {item.sensor_id: item.value for item in session.historian.all()}
+        assert by_sensor["sensor_zone_1_call"] == 0
+
+
+def test_inversion_is_applied_before_ingestion(tmp_path: Path) -> None:
+    """A stored 1 always means asserted, whatever the wiring does."""
+
+    with bits_session(tmp_path, FakeBitTransport(asserted=False), inverted=True) as session:
+        session.run_cycle()
+
+        by_sensor = {item.sensor_id: item.value for item in session.historian.all()}
+        assert by_sensor["sensor_zone_1_call"] == 1
+
+
+def test_registers_and_bits_are_read_in_one_cycle(tmp_path: Path) -> None:
+    bits = FakeBitTransport(asserted=True)
+
+    with bits_session(tmp_path, bits) as session:
+        outcome = session.run_cycle()
+
+        assert outcome.report is not None
+        assert outcome.report.success_count == 2
+        assert bits.calls == 1
+        assert session.historian.count() == 2
+
+
+def test_a_bit_read_failure_is_structured(tmp_path: Path) -> None:
+    from geopilot.modbus_transport import ModbusTransportError, ModbusTransportErrorCode
+
+    bits = FakeBitTransport(
+        error=ModbusTransportError(
+            code=ModbusTransportErrorCode.TIMEOUT,
+            message="no answer",
+            request_id="read_zone_1",
+        )
+    )
+
+    with bits_session(tmp_path, bits) as session:
+        outcome = session.run_cycle()
+
+        assert outcome.succeeded
+        assert outcome.report is not None
+        assert outcome.report.success_count == 1
+        assert outcome.report.failure_count == 1
