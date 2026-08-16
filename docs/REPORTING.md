@@ -63,6 +63,71 @@ For a `state` sensor the mean **is** the duty cycle over that interval, since
 the values are 0 and 1. `--bucket 1d` on a zone call is a day-by-day picture of
 how hard that zone was working.
 
+## The loop delta
+
+```bash
+python3 tools/geopilot_report.py --database geopilot.sqlite3 \
+    --sensor sensor_loop_in --minus sensor_loop_out --bucket 1d
+```
+
+```text
+starts at                    count        min        max       mean
+2026-01-12T00:00:00-05:00      288       0.15      3.325      1.416
+2026-01-13T00:00:00-05:00      288       0.15      2.965      1.266
+2026-01-14T00:00:00-05:00      288       0.15      2.605      1.116
+2026-01-15T00:00:00-05:00      288       0.15      2.245     0.9657
+```
+
+Without `--bucket` it prints one summary over the whole window.
+
+### Two readings are never taken at the same instant
+
+Each Modbus read is its own transaction on a half-duplex segment, so loop-in and
+loop-out arrive seconds apart. An exact-timestamp join would find nothing at all.
+
+So readings are **paired**: each observation of one sensor is matched with the
+nearest observation of the other, if one falls within `--tolerance` (30 seconds
+by default). The pairing is **one to one** — once a reading is used it is
+consumed. If one sensor is sampled five times as often as the other, the extras
+go unpaired rather than reusing a stale partner five times over, and the unpaired
+counts are printed:
+
+```text
+unpaired: 41 of sensor_loop_in, 2 of sensor_loop_out
+```
+
+That line is part of the result, not a diagnostic. A delta computed from 40
+pairs out of 1,440 readings is a different claim from one computed from 1,438.
+
+**Keep the tolerance under half the polling interval.** The pairing walks both
+series forward once and never backtracks, which is safe exactly when no two
+readings of one sensor can reach the same partner. The narrow default is what
+guarantees a pair comes from a single acquisition cycle.
+
+### The delta is computed per pair, then aggregated
+
+Never as one sensor's bucket mean minus the other's. Those agree for the mean
+and **do not agree for the extremes**: the smallest difference is not the
+difference of the smallest readings. A bucket built the cheap way would report a
+minimum that never occurred, and it would look entirely plausible.
+
+Both sensors must carry the same unit. Comparing a temperature against a zone
+call is refused rather than subtracted.
+
+### What the daily mean is not
+
+In the table above the daily mean falls from 1.42 to 0.97 — but so does the
+`max`, from 3.33 to 2.25, and those two numbers are not saying the same thing.
+**The mean mixes running and idle time.** A day when the equipment ran less
+produces a smaller mean delta with no change whatsoever in the loop's behaviour.
+
+The `max` column is closer to the delta while running, but it is an extreme and
+one bad reading moves it.
+
+There is no way here to restrict a delta to the periods when the equipment was
+actually running. That needs the delta filtered by a `state` sensor, and it is
+the obvious next thing this is missing.
+
 | Exit code | Meaning |
 | --- | --- |
 | 0 | a report was produced |
@@ -149,13 +214,14 @@ itself a fault worth seeing.
 of 20 and 68 is a number with no meaning. Coverage still lists both, as separate
 rows, which is how you notice.
 
-**It does not compare sensors.** Every aggregate covers one sensor. Loop-in
-against loop-out — the delta that actually says something about the ground field
-— is a join, and it is not here.
+**It compares two sensors, not three.** A delta has exactly two ends, and there
+is no way to condition one series on another — see the note on running versus
+idle above.
 
-**Its largest gap is computed in Python** over the sensor's timestamps rather
-than in SQL. That is fine for a year of one-minute samples and would not be for
-a decade of them.
+**Its largest gap and its pairing are computed in Python** rather than in SQL.
+The pairing streams both series and holds two rows at a time, so it does not
+grow with the window; the gap scan reads a sensor's timestamps into memory. Both
+are fine for a year of one-minute samples and would not be for a decade of them.
 
 ## Testing
 
@@ -174,3 +240,10 @@ than at its first sample, an empty interval staying absent, a state bucket's
 mean equalling its duty cycle, interval validation in both directions, and the
 local-versus-UTC pair — the same eight evening readings falling into two local
 days and one UTC day, which is the case that justifies the default.
+
+For deltas: pairing readings taken seconds apart, the sign following the order
+asked for, the tolerance excluding and including the same pair, a partner being
+consumed rather than reused, the nearest of two candidates winning, unpaired
+counts, refusing mismatched units and a sensor against itself, and the case that
+justifies pairwise aggregation — two pairs whose deltas are 1.0 and 2.0, where
+subtracting the bucket minima would have claimed a minimum of 2.0.

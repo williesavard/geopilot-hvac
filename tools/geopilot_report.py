@@ -14,6 +14,10 @@ Answers the questions a recording exists to answer, without a dashboard.
     python3 tools/geopilot_report.py --database db.sqlite3 \
         --sensor sensor_loop_in --bucket 1h --csv > loop.csv
 
+    # the loop delta, day by day
+    python3 tools/geopilot_report.py --database db.sqlite3 \
+        --sensor sensor_loop_in --minus sensor_loop_out --bucket 1d
+
 Read-only. It opens the database in read-only mode, so it can run while the
 recorder is still writing and cannot damage what it reads.
 """
@@ -28,9 +32,12 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
 from geopilot.reporting import (
+    DEFAULT_PAIRING_TOLERANCE,
     ReportingError,
     bucketed,
+    bucketed_delta,
     coverage,
+    delta,
     duty_cycle,
     open_readonly,
     summarize,
@@ -67,6 +74,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--utc",
         action="store_true",
         help="align buckets to UTC instead of the wall clock where readings were taken",
+    )
+    parser.add_argument(
+        "--minus",
+        help="report --sensor minus this sensor, pairing readings taken together",
+    )
+    parser.add_argument(
+        "--tolerance",
+        help=(
+            "how far apart two readings may be and still be paired, default 30s; "
+            "keep it under half the polling interval"
+        ),
     )
     parser.add_argument(
         "--csv",
@@ -129,12 +147,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         start = parse_moment(arguments.since, "--since")
         end = parse_moment(arguments.until, "--until")
         interval = parse_interval(arguments.bucket) if arguments.bucket else None
+        tolerance = (
+            parse_interval(arguments.tolerance)
+            if arguments.tolerance
+            else DEFAULT_PAIRING_TOLERANCE
+        )
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
         return EXIT_USAGE
 
     if interval is not None and not arguments.sensor:
         print("error: --bucket needs --sensor; buckets are per sensor", file=sys.stderr)
+        return EXIT_USAGE
+
+    if arguments.minus and not arguments.sensor:
+        print("error: --minus needs --sensor; a delta has two ends", file=sys.stderr)
         return EXIT_USAGE
 
     try:
@@ -148,11 +175,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _report_buckets(
                 connection,
                 arguments.sensor,
+                minus=arguments.minus,
                 interval=interval,
+                tolerance=tolerance,
                 start=start,
                 end=end,
                 local=not arguments.utc,
                 as_csv=arguments.csv,
+            )
+        if arguments.minus:
+            return _report_delta(
+                connection,
+                arguments.sensor,
+                minus=arguments.minus,
+                tolerance=tolerance,
+                start=start,
+                end=end,
             )
         if arguments.sensor:
             return _report_sensor(connection, arguments.sensor, start, end)
@@ -209,21 +247,70 @@ def _report_sensor(
     return EXIT_OK
 
 
+def _report_delta(
+    connection: sqlite3.Connection,
+    sensor_id: str,
+    *,
+    minus: str,
+    tolerance: timedelta,
+    start: datetime | None,
+    end: datetime | None,
+) -> int:
+    summary = delta(
+        connection, sensor_id, minus=minus, tolerance=tolerance, start=start, end=end
+    )
+    if summary is None:
+        print(f"no paired readings of {sensor_id} and {minus} in that window")
+        return EXIT_NO_DATA
+
+    print(f"delta  : {summary.sensor_id} minus {summary.minus}")
+    print(f"unit   : {summary.unit}")
+    print(f"pairs  : {summary.count:,}")
+    print(f"min    : {summary.minimum:g}")
+    print(f"max    : {summary.maximum:g}")
+    print(f"mean   : {summary.mean:g}")
+
+    if summary.unpaired or summary.unpaired_minus:
+        print(
+            f"\nunpaired: {summary.unpaired:,} of {summary.sensor_id}, "
+            f"{summary.unpaired_minus:,} of {summary.minus}"
+        )
+        print("(a delta from few pairs describes few moments; widen --tolerance or check the bus)")
+
+    return EXIT_OK
+
+
 def _report_buckets(
     connection: sqlite3.Connection,
     sensor_id: str,
     *,
+    minus: str | None,
     interval: timedelta,
+    tolerance: timedelta,
     start: datetime | None,
     end: datetime | None,
     local: bool,
     as_csv: bool,
 ) -> int:
-    buckets = bucketed(
-        connection, sensor_id, interval=interval, start=start, end=end, local=local
-    )
+    if minus:
+        buckets = bucketed_delta(
+            connection,
+            sensor_id,
+            minus=minus,
+            interval=interval,
+            tolerance=tolerance,
+            start=start,
+            end=end,
+            local=local,
+        )
+    else:
+        buckets = bucketed(
+            connection, sensor_id, interval=interval, start=start, end=end, local=local
+        )
+
     if not buckets:
-        print(f"no measurements for {sensor_id} in that window")
+        subject = f"{sensor_id} and {minus}" if minus else sensor_id
+        print(f"no measurements for {subject} in that window")
         return EXIT_NO_DATA
 
     if as_csv:

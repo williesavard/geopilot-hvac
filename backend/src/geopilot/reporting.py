@@ -20,6 +20,7 @@ ratio of samples, not a diagnosis.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -29,6 +30,20 @@ from geopilot.domain import epoch_microseconds
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _MICROSECOND = timedelta(microseconds=1)
 _DAY_MICROSECONDS = 86_400_000_000
+
+PRE_EPOCH_MESSAGE = (
+    "that window contains observations stamped before 1970, which cannot be "
+    "bucketed; the recording host's clock was almost certainly unset"
+)
+
+DEFAULT_PAIRING_TOLERANCE = timedelta(seconds=30)
+"""How far apart two readings may be and still describe the same moment.
+
+Thirty seconds is under half the one-minute polling interval the deployment
+documents, so a reading can only ever pair within its own cycle. Poll faster
+than once a minute and this must come down with it, or a sample will reach
+across into the neighbouring cycle.
+"""
 
 
 class ReportingError(RuntimeError):
@@ -64,6 +79,26 @@ class Bucket:
     minimum: float
     maximum: float
     mean: float
+
+
+@dataclass(frozen=True, slots=True)
+class DeltaSummary:
+    """The difference between two sensors, over paired observations.
+
+    `unpaired` and `unpaired_minus` are part of the result, not diagnostics. A
+    delta computed from 40 pairs out of 1,440 readings is a different claim from
+    one computed from 1,438, and the reader has to be able to tell.
+    """
+
+    sensor_id: str
+    minus: str
+    unit: str
+    count: int
+    minimum: float
+    maximum: float
+    mean: float
+    unpaired: int
+    unpaired_minus: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +260,97 @@ def bucketed(
     )
 
 
+def delta(
+    connection: sqlite3.Connection,
+    sensor_id: str,
+    *,
+    minus: str,
+    tolerance: timedelta = DEFAULT_PAIRING_TOLERANCE,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> DeltaSummary | None:
+    """Summarize `sensor_id` minus `minus`, over paired observations.
+
+    For a ground loop this is the question the whole installation turns on: how
+    much heat is actually crossing the heat exchanger. It is a difference in the
+    sensors' shared unit, not an absolute reading, and both sensors must carry
+    the same unit or the call is refused.
+
+    Returns None when no pair could be formed.
+    """
+
+    unit = _shared_unit(connection, sensor_id, minus, start, end)
+
+    values = [value for _, _, value in _pairs(connection, sensor_id, minus, tolerance, start, end)]
+    if not values:
+        return None
+
+    return DeltaSummary(
+        sensor_id=sensor_id,
+        minus=minus,
+        unit=unit,
+        count=len(values),
+        minimum=min(values),
+        maximum=max(values),
+        mean=sum(values) / len(values),
+        unpaired=_sample_count(connection, sensor_id, start, end) - len(values),
+        unpaired_minus=_sample_count(connection, minus, start, end) - len(values),
+    )
+
+
+def bucketed_delta(
+    connection: sqlite3.Connection,
+    sensor_id: str,
+    *,
+    minus: str,
+    interval: timedelta,
+    tolerance: timedelta = DEFAULT_PAIRING_TOLERANCE,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    local: bool = True,
+) -> tuple[Bucket, ...]:
+    """Aggregate the difference between two sensors into fixed intervals.
+
+    The delta is computed **per pair and then aggregated**, never as one
+    sensor's bucket mean minus the other's. Those agree for the mean and do not
+    agree for the extremes: the smallest difference is not the difference of the
+    smallest readings, and a bucket built that way would report a minimum that
+    never occurred.
+
+    Each pair falls in the bucket of `sensor_id`'s observation, which is also the
+    one whose UTC offset aligns it to a local wall clock.
+    """
+
+    bucket_microseconds = _bucket_microseconds(interval)
+    _shared_unit(connection, sensor_id, minus, start, end)
+
+    grouped: dict[int, list[float]] = {}
+    offsets: dict[int, int] = {}
+    for microseconds, offset_seconds, value in _pairs(
+        connection, sensor_id, minus, tolerance, start, end
+    ):
+        instant = microseconds + offset_seconds * 1_000_000 if local else microseconds
+        if instant < 0:
+            raise ReportingError(PRE_EPOCH_MESSAGE)
+        index = instant // bucket_microseconds
+        grouped.setdefault(index, []).append(value)
+        offsets.setdefault(index, offset_seconds)
+
+    return tuple(
+        Bucket(
+            starts_at=_bucket_start(
+                index * bucket_microseconds,
+                offset_seconds=offsets[index] if local else 0,
+            ),
+            count=len(values),
+            minimum=min(values),
+            maximum=max(values),
+            mean=sum(values) / len(values),
+        )
+        for index, values in sorted(grouped.items())
+    )
+
+
 def duty_cycle(
     connection: sqlite3.Connection,
     sensor_id: str,
@@ -252,6 +378,124 @@ def duty_cycle(
     if not count:
         return None
     return float(asserted) / float(count)
+
+
+def _pairs(
+    connection: sqlite3.Connection,
+    sensor_id: str,
+    minus: str,
+    tolerance: timedelta,
+    start: datetime | None,
+    end: datetime | None,
+) -> Iterator[tuple[int, int, float]]:
+    """Pair each observation of one sensor with the nearest of another.
+
+    Two sensors are never read at the same instant. Each Modbus read is its own
+    transaction on a half-duplex segment, so loop-in and loop-out arrive seconds
+    apart and an exact-timestamp join would find nothing at all.
+
+    The pairing is **one to one**: once a reading is used it is consumed. If one
+    sensor is sampled five times as often as the other, the extra readings go
+    unpaired rather than reusing a stale partner five times over — which is what
+    makes the unpaired counts mean something.
+
+    It walks both series forward once and never backtracks. That is safe as long
+    as the tolerance stays under half the polling interval, because then no two
+    readings of one sensor can both fall within reach of the same partner. Set
+    the tolerance wider than that and a reading can be claimed by the wrong
+    neighbour — which is why the default is deliberately narrow.
+
+    Yields `(observed_at_us, observed_at_offset_s, difference)` for each pair,
+    taking the timestamp and offset from `sensor_id`.
+    """
+
+    if tolerance < timedelta(0):
+        raise ReportingError(f"a pairing tolerance cannot be negative, received {tolerance}")
+    tolerance_microseconds = tolerance // _MICROSECOND
+
+    left = _observations(connection, sensor_id, start, end)
+    right = _observations(connection, minus, start, end)
+
+    partner = next(right, None)
+    upcoming = next(right, None)
+
+    for microseconds, offset_seconds, value in left:
+        while upcoming is not None and partner is not None:
+            if abs(upcoming[0] - microseconds) >= abs(partner[0] - microseconds):
+                break
+            partner, upcoming = upcoming, next(right, None)
+
+        if partner is None:
+            return
+        if abs(partner[0] - microseconds) <= tolerance_microseconds:
+            yield microseconds, offset_seconds, value - partner[2]
+            partner, upcoming = upcoming, next(right, None)
+
+
+def _observations(
+    connection: sqlite3.Connection,
+    sensor_id: str,
+    start: datetime | None,
+    end: datetime | None,
+) -> Iterator[tuple[int, int, float]]:
+    clauses = ["sensor_id = ?"]
+    parameters: list[object] = [sensor_id]
+    _append_window(clauses, parameters, start, end)
+
+    cursor = connection.execute(
+        "SELECT observed_at_us, observed_at_offset_s, value FROM measurements "
+        f"WHERE {' AND '.join(clauses)} ORDER BY observed_at_us",
+        tuple(parameters),
+    )
+    for microseconds, offset_seconds, value in cursor:
+        yield int(microseconds), int(offset_seconds), float(value)
+
+
+def _shared_unit(
+    connection: sqlite3.Connection,
+    sensor_id: str,
+    minus: str,
+    start: datetime | None,
+    end: datetime | None,
+) -> str:
+    """Return the unit both sensors share, or refuse the comparison."""
+
+    if sensor_id == minus:
+        raise ReportingError("a sensor cannot be compared against itself")
+
+    clauses = ["sensor_id IN (?, ?)"]
+    parameters: list[object] = [sensor_id, minus]
+    _append_window(clauses, parameters, start, end)
+
+    units = connection.execute(
+        f"SELECT DISTINCT unit FROM measurements WHERE {' AND '.join(clauses)}",
+        tuple(parameters),
+    ).fetchall()
+
+    if len(units) > 1:
+        spellings = ", ".join(sorted(str(unit) for (unit,) in units))
+        raise ReportingError(
+            f"{sensor_id} and {minus} are not recorded in the same unit ({spellings}); "
+            "their difference would mean nothing"
+        )
+    return str(units[0][0]) if units else ""
+
+
+def _sample_count(
+    connection: sqlite3.Connection,
+    sensor_id: str,
+    start: datetime | None,
+    end: datetime | None,
+) -> int:
+    clauses = ["sensor_id = ?"]
+    parameters: list[object] = [sensor_id]
+    _append_window(clauses, parameters, start, end)
+
+    (count,) = connection.execute(
+        f"SELECT COUNT(*) FROM measurements WHERE {' AND '.join(clauses)}",
+        tuple(parameters),
+    ).fetchone()
+    return int(count)
 
 
 def _bucket_microseconds(interval: timedelta) -> int:
@@ -309,10 +553,7 @@ def _require_post_epoch(
     ).fetchone()
 
     if earliest is not None and earliest < 0:
-        raise ReportingError(
-            "that window contains observations stamped before 1970, which cannot be "
-            "bucketed; the recording host's clock was almost certainly unset"
-        )
+        raise ReportingError(PRE_EPOCH_MESSAGE)
 
 
 def _require_single_unit(

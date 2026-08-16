@@ -17,7 +17,9 @@ from geopilot.domain import DataQuality, Measurement
 from geopilot.reporting import (
     ReportingError,
     bucketed,
+    bucketed_delta,
     coverage,
+    delta,
     duty_cycle,
     open_readonly,
     summarize,
@@ -511,6 +513,325 @@ def test_bucketing_refuses_mixed_units(tmp_path: Path) -> None:
 
     with pytest.raises(ReportingError, match="different units"):
         bucketed(connection, "sensor_loop_in", interval=timedelta(hours=1))
+
+
+def loop_pair(
+    tmp_path: Path,
+    *,
+    inbound: tuple[float, ...],
+    outbound: tuple[float, ...],
+    lag: timedelta = timedelta(seconds=3),
+    outbound_every: int = 1,
+) -> sqlite3.Connection:
+    """A loop-in and a loop-out series, read a few seconds apart as on a real bus."""
+
+    measurements = [
+        measurement(index=index, sensor_id="sensor_loop_in", value=value)
+        for index, value in enumerate(inbound)
+    ]
+    measurements += [
+        measurement(
+            index=index,
+            sensor_id="sensor_loop_out",
+            value=value,
+            observed_at=START + timedelta(minutes=index * outbound_every) + lag,
+        )
+        for index, value in enumerate(outbound)
+    ]
+    return recorded(tmp_path, measurements)
+
+
+def test_the_delta_pairs_readings_taken_seconds_apart(tmp_path: Path) -> None:
+    """An exact-timestamp join would find nothing; two sensors are never read at once."""
+
+    connection = loop_pair(tmp_path, inbound=(2.0, 2.4, 2.8), outbound=(-1.0, -0.6, -0.2))
+
+    summary = delta(connection, "sensor_loop_in", minus="sensor_loop_out")
+
+    assert summary is not None
+    assert summary.count == 3
+    assert (summary.minimum, summary.maximum, summary.mean) == (3.0, 3.0, 3.0)
+    assert summary.unit == "degC"
+    assert (summary.unpaired, summary.unpaired_minus) == (0, 0)
+
+
+def test_the_delta_is_signed_in_the_order_asked_for(tmp_path: Path) -> None:
+    connection = loop_pair(tmp_path, inbound=(2.0,), outbound=(-1.0,))
+
+    forward = delta(connection, "sensor_loop_in", minus="sensor_loop_out")
+    backward = delta(connection, "sensor_loop_out", minus="sensor_loop_in")
+
+    assert forward is not None
+    assert backward is not None
+    assert forward.mean == 3.0
+    assert backward.mean == -3.0
+
+
+def test_readings_beyond_the_tolerance_are_not_paired(tmp_path: Path) -> None:
+    connection = loop_pair(
+        tmp_path, inbound=(2.0,), outbound=(-1.0,), lag=timedelta(seconds=45)
+    )
+
+    assert delta(connection, "sensor_loop_in", minus="sensor_loop_out") is None
+
+
+def test_a_wider_tolerance_accepts_them(tmp_path: Path) -> None:
+    connection = loop_pair(
+        tmp_path, inbound=(2.0,), outbound=(-1.0,), lag=timedelta(seconds=45)
+    )
+
+    summary = delta(
+        connection,
+        "sensor_loop_in",
+        minus="sensor_loop_out",
+        tolerance=timedelta(minutes=1),
+    )
+
+    assert summary is not None
+    assert summary.mean == 3.0
+
+
+def test_unpaired_readings_are_counted_rather_than_hidden(tmp_path: Path) -> None:
+    """A delta from 2 pairs out of 6 readings is a different claim from 6 out of 6."""
+
+    connection = loop_pair(
+        tmp_path,
+        inbound=(2.0, 2.0, 2.0, 2.0, 2.0, 2.0),
+        outbound=(-1.0, -1.0),
+        outbound_every=3,
+    )
+
+    summary = delta(connection, "sensor_loop_in", minus="sensor_loop_out")
+
+    assert summary is not None
+    assert summary.count == 2
+    assert summary.unpaired == 4
+    assert summary.unpaired_minus == 0
+
+
+def test_a_partner_is_consumed_rather_than_reused(tmp_path: Path) -> None:
+    """One stale reading must not stand in for five, or the counts mean nothing."""
+
+    connection = loop_pair(
+        tmp_path,
+        inbound=(2.0, 2.0, 2.0),
+        outbound=(-1.0,),
+        lag=timedelta(seconds=1),
+    )
+
+    summary = delta(
+        connection,
+        "sensor_loop_in",
+        minus="sensor_loop_out",
+        tolerance=timedelta(hours=1),
+    )
+
+    assert summary is not None
+    assert summary.count == 1
+    assert summary.unpaired == 2
+
+
+def test_the_nearest_partner_is_chosen(tmp_path: Path) -> None:
+    connection = recorded(
+        tmp_path,
+        [
+            measurement(index=0, sensor_id="sensor_loop_in", value=10.0),
+            measurement(
+                index=0,
+                sensor_id="sensor_loop_out",
+                value=1.0,
+                observed_at=START - timedelta(seconds=20),
+            ),
+            measurement(
+                index=1,
+                sensor_id="sensor_loop_out",
+                value=2.0,
+                observed_at=START + timedelta(seconds=2),
+            ),
+        ],
+    )
+
+    summary = delta(connection, "sensor_loop_in", minus="sensor_loop_out")
+
+    assert summary is not None
+    assert summary.count == 1
+    assert summary.mean == 8.0
+
+
+def test_comparing_sensors_in_different_units_is_refused(tmp_path: Path) -> None:
+    connection = recorded(
+        tmp_path,
+        [
+            measurement(index=0, sensor_id="sensor_loop_in", value=20.0, unit="degC"),
+            measurement(index=1, sensor_id="sensor_zone_1", value=1, unit="state"),
+        ],
+    )
+
+    with pytest.raises(ReportingError, match="not recorded in the same unit"):
+        delta(connection, "sensor_loop_in", minus="sensor_zone_1")
+
+
+def test_comparing_a_sensor_against_itself_is_refused(tmp_path: Path) -> None:
+    connection = loop_pair(tmp_path, inbound=(2.0,), outbound=(-1.0,))
+
+    with pytest.raises(ReportingError, match="itself"):
+        delta(connection, "sensor_loop_in", minus="sensor_loop_in")
+
+
+def test_a_negative_tolerance_is_refused(tmp_path: Path) -> None:
+    connection = loop_pair(tmp_path, inbound=(2.0,), outbound=(-1.0,))
+
+    with pytest.raises(ReportingError, match="negative"):
+        delta(
+            connection,
+            "sensor_loop_in",
+            minus="sensor_loop_out",
+            tolerance=timedelta(seconds=-1),
+        )
+
+
+def test_a_delta_without_any_pair_is_none(tmp_path: Path) -> None:
+    connection = recorded(tmp_path, [measurement(index=0, sensor_id="sensor_loop_in")])
+
+    assert delta(connection, "sensor_loop_in", minus="sensor_loop_out") is None
+
+
+def test_the_delta_honours_the_window(tmp_path: Path) -> None:
+    connection = loop_pair(
+        tmp_path,
+        inbound=(2.0, 5.0, 9.0),
+        outbound=(-1.0, -1.0, -1.0),
+    )
+
+    summary = delta(
+        connection,
+        "sensor_loop_in",
+        minus="sensor_loop_out",
+        start=START + timedelta(minutes=1),
+        end=START + timedelta(minutes=2),
+    )
+
+    assert summary is not None
+    assert summary.count == 1
+    assert summary.mean == 6.0
+
+
+def test_delta_buckets_aggregate_the_pairs_not_the_bucket_means(tmp_path: Path) -> None:
+    """The smallest difference is not the difference of the smallest readings."""
+
+    connection = loop_pair(
+        tmp_path,
+        inbound=(10.0, 2.0),
+        outbound=(9.0, 0.0),
+    )
+
+    bucket = bucketed_delta(
+        connection,
+        "sensor_loop_in",
+        minus="sensor_loop_out",
+        interval=timedelta(hours=1),
+        local=False,
+    )[0]
+
+    # Pairwise the deltas are 1.0 and 2.0. Subtracting the bucket minima would
+    # have claimed a minimum of 2.0 - 0.0 = 2.0, which never occurred.
+    assert (bucket.minimum, bucket.maximum, bucket.mean) == (1.0, 2.0, 1.5)
+
+
+def test_delta_buckets_are_ordered_and_split_by_interval(tmp_path: Path) -> None:
+    connection = loop_pair(
+        tmp_path,
+        inbound=(2.0,) * 90,
+        outbound=(-1.0,) * 90,
+    )
+
+    buckets = bucketed_delta(
+        connection,
+        "sensor_loop_in",
+        minus="sensor_loop_out",
+        interval=timedelta(hours=1),
+        local=False,
+    )
+
+    assert [bucket.count for bucket in buckets] == [60, 30]
+    assert buckets[0].starts_at == START
+    assert buckets[1].starts_at == START + timedelta(hours=1)
+
+
+def test_delta_buckets_align_to_the_local_wall_clock(tmp_path: Path) -> None:
+    eastern = timezone(timedelta(hours=-5))
+    evening = datetime(2026, 1, 15, 22, 0, tzinfo=eastern)
+    measurements = []
+    for index in range(4):
+        moment = evening + timedelta(hours=index)
+        measurements.append(
+            measurement(index=index, sensor_id="sensor_loop_in", value=2.0, observed_at=moment)
+        )
+        measurements.append(
+            measurement(
+                index=index,
+                sensor_id="sensor_loop_out",
+                value=-1.0,
+                observed_at=moment + timedelta(seconds=3),
+            )
+        )
+
+    buckets = bucketed_delta(
+        recorded(tmp_path, measurements),
+        "sensor_loop_in",
+        minus="sensor_loop_out",
+        interval=timedelta(days=1),
+    )
+
+    assert [bucket.starts_at.isoformat() for bucket in buckets] == [
+        "2026-01-15T00:00:00-05:00",
+        "2026-01-16T00:00:00-05:00",
+    ]
+    assert [bucket.count for bucket in buckets] == [2, 2]
+
+
+def test_delta_buckets_refuse_an_interval_that_drifts(tmp_path: Path) -> None:
+    connection = loop_pair(tmp_path, inbound=(2.0,), outbound=(-1.0,))
+
+    with pytest.raises(ReportingError, match="drift"):
+        bucketed_delta(
+            connection,
+            "sensor_loop_in",
+            minus="sensor_loop_out",
+            interval=timedelta(hours=7),
+        )
+
+
+def test_delta_buckets_refuse_mismatched_units_before_pairing(tmp_path: Path) -> None:
+    connection = recorded(
+        tmp_path,
+        [
+            measurement(index=0, sensor_id="sensor_loop_in", value=20.0, unit="degC"),
+            measurement(index=1, sensor_id="sensor_zone_1", value=1, unit="state"),
+        ],
+    )
+
+    with pytest.raises(ReportingError, match="not recorded in the same unit"):
+        bucketed_delta(
+            connection,
+            "sensor_loop_in",
+            minus="sensor_zone_1",
+            interval=timedelta(hours=1),
+        )
+
+
+def test_delta_buckets_without_pairs_are_empty(tmp_path: Path) -> None:
+    connection = recorded(tmp_path, [measurement(index=0, sensor_id="sensor_loop_in")])
+
+    assert (
+        bucketed_delta(
+            connection,
+            "sensor_loop_in",
+            minus="sensor_loop_out",
+            interval=timedelta(hours=1),
+        )
+        == ()
+    )
 
 
 def test_a_report_can_be_produced_while_recording_continues(tmp_path: Path) -> None:
