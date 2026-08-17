@@ -36,6 +36,7 @@ from geopilot.dashboard import DeltaPair, render
 from geopilot.modbus_pyserial_transport import (
     PySerialModbusBitTransport,
     PySerialModbusConfig,
+    PySerialModbusTransport,
     open_serial_port,
 )
 from geopilot.modbus_pyserial_write import PySerialModbusWriteTransport
@@ -45,6 +46,8 @@ from geopilot.modbus_transport import (
     ModbusTransportError,
 )
 from geopilot.modbus_write import ModbusCoilWriteRequest, ModbusWriteError
+from geopilot.onewire import SysfsOneWireBus
+from geopilot.probe import ProbeResult, probe_bits, probe_onewire, probe_registers
 from geopilot.reporting import ReportingError, open_readonly
 
 EXIT_OK = 0
@@ -102,15 +105,7 @@ class SerialBus:
         self._config = config
 
     def _settings(self, target_id: str) -> PySerialModbusConfig:
-        source = self._config.source(self._config.control_source(target_id))
-        return PySerialModbusConfig(
-            port=source.port,
-            baudrate=source.baudrate,
-            parity=source.parity,
-            stopbits=source.stopbits,
-            bytesize=source.bytesize,
-            timeout=source.timeout,
-        )
+        return _settings(self._config, self._config.control_source(target_id))
 
     def write_coil(self, request: ModbusCoilWriteRequest) -> None:
         """Satisfy `ModbusWriteTransport` by opening, writing and closing."""
@@ -156,6 +151,20 @@ class SerialBus:
             _close(port)
 
         return bool(response.bits[0])
+
+
+def _settings(config: InstallationConfig, source_id: str) -> PySerialModbusConfig:
+    """Serial settings for one configured source."""
+
+    source = config.source(source_id)
+    return PySerialModbusConfig(
+        port=source.port,
+        baudrate=source.baudrate,
+        parity=source.parity,
+        stopbits=source.stopbits,
+        bytesize=source.bytesize,
+        timeout=source.timeout,
+    )
 
 
 def _close(port: object) -> None:
@@ -209,12 +218,60 @@ def main(argv: Sequence[str] | None = None) -> int:
         finally:
             connection.close()
 
+    def probe() -> list[dict[str, object]]:
+        """Read every configured sensor from the hardware, right now.
+
+        Each transport opens its own port and the probe closes over nothing, so
+        this is safe to call from whichever request thread asks for it.
+        """
+
+        results: list[ProbeResult] = []
+        for source in config.onewire_sources:
+            results.extend(
+                probe_onewire(
+                    SysfsOneWireBus(source.root),
+                    tuple(
+                        read
+                        for read in config.onewire_reads
+                        if read.source_id == source.source_id
+                    ),
+                )
+            )
+        results.extend(
+            probe_registers(
+                lambda source_id: PySerialModbusTransport(_settings(config, source_id)),
+                config.reads,
+            )
+        )
+        results.extend(
+            probe_bits(
+                lambda source_id: PySerialModbusBitTransport(_settings(config, source_id)),
+                config.bit_reads,
+            )
+        )
+        return [
+            {
+                "label": item.label,
+                "kind": str(item.kind),
+                "reference": item.reference,
+                "sensor_id": item.sensor_id,
+                "value": item.value,
+                "unit": item.unit,
+                "ok": item.ok,
+                "configured": item.configured,
+                "suspect": item.suspect,
+                "detail": item.detail,
+            }
+            for item in results
+        ]
+
     bus = SerialBus(config)
     surface = ControlSurface(
         build_service(config.control, bus),
         config.control,
         page=page,
         read_state=bus.read_state,
+        probe=probe,
     )
 
     server = serve(surface, host=arguments.bind, port=arguments.port)

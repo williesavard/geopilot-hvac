@@ -189,3 +189,70 @@
   refresh();
   setInterval(refresh, POLL_MS);
 })();
+
+/* The probe button.
+ *
+ * Separate closure from the relay controls: probing is a read, it needs no
+ * confirmation and no reason, and it must keep working on a surface where
+ * control is disabled — which is where it is most useful.
+ */
+(function () {
+  "use strict";
+
+  const token = window.GEOPILOT && window.GEOPILOT.controlToken;
+  const button = document.getElementById("probe-now");
+  const card = document.getElementById("probe");
+  if (!token || !button || !card) return;
+
+  function line(result) {
+    const reading = result.value === null ? "—" : `${result.value} ${result.unit}`;
+    const mark = result.ok && !result.suspect ? "" : "! ";
+    const note = [result.sensor_id ? result.reference : "", result.detail]
+      .filter(Boolean)
+      .join(" · ");
+    return `${mark}${result.label} · ${reading}${note ? " · " + note : ""}`;
+  }
+
+  async function probe() {
+    button.disabled = true;
+    const previous = button.textContent;
+    button.textContent = "asking…";
+
+    let out = card.querySelector(".readout");
+    if (!out) {
+      out = document.createElement("div");
+      out.className = "readout";
+      card.appendChild(out);
+    }
+    out.textContent = "";
+
+    try {
+      const response = await fetch("/api/probe", {
+        method: "POST",
+        headers: { "X-GeoPilot-Token": token, "Content-Type": "application/json" },
+      });
+      const body = await response.json().catch(() => ({}));
+
+      if (body.error) {
+        const problem = document.createElement("div");
+        problem.textContent = body.error;
+        out.appendChild(problem);
+      }
+      (body.results || []).forEach((result) => {
+        const row = document.createElement("div");
+        row.textContent = line(result);
+        out.appendChild(row);
+      });
+      if (!body.results || body.results.length === 0) {
+        if (!body.error) out.textContent = "nothing configured to probe";
+      }
+    } catch (error) {
+      out.textContent = `the probe could not be reached: ${error}`;
+    } finally {
+      button.disabled = false;
+      button.textContent = previous;
+    }
+  }
+
+  button.addEventListener("click", probe);
+})();

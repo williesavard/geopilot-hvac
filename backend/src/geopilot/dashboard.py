@@ -102,7 +102,12 @@ def render(
 
     if roster:
         sections.append(
-            _connection_section(connection, roster, generated_at or _now())
+            _connection_section(
+                connection,
+                roster,
+                generated_at or _now(),
+                live=control_token is not None,
+            )
         )
 
     sections.append(_health_section(sensors))
@@ -199,6 +204,8 @@ def _connection_section(
     connection: sqlite3.Connection,
     roster: tuple[ConfiguredSensor, ...],
     now: datetime,
+    *,
+    live: bool = False,
 ) -> str:
     """What is wired, what is talking, and what was never heard from.
 
@@ -250,10 +257,26 @@ def _connection_section(
         else f"{troubled} of {len(verdicts)} need attention."
     )
 
+    probe = (
+        """
+<div class="card" id="probe">
+  <div class="controls">
+    <button type="button" id="probe-now">ask the hardware now</button>
+  </div>
+  <p class="note">The table below is as fresh as the last poll. This reads every
+  configured sensor immediately, and lists any 1-Wire probe on the bus that the
+  configuration does not mention yet.</p>
+</div>
+"""
+        if live
+        else ""
+    )
+
     return f"""
 <h2>What is connected</h2>
 <p class="subtitle">{headline} Every sensor the configuration expects is listed,
 including the ones that have never said anything.</p>
+{probe}
 <div class="card">
   <ul class="buses">{buses}</ul>
 </div>
