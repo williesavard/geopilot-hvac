@@ -237,6 +237,24 @@ button:disabled {
   font-variant-numeric: tabular-nums;
 }
 
+.buses {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.buses li + li {
+  margin-top: 0.4rem;
+}
+
+/* The advice column is prose, not a measurement: let it wrap and stay quiet. */
+td.detail {
+  white-space: normal;
+  color: var(--ink-soft);
+  font-size: 0.84rem;
+  min-width: 16rem;
+}
+
 .caveat {
   border-left: 3px solid var(--warn);
   padding-left: 0.8rem;

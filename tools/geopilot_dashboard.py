@@ -22,6 +22,8 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from geopilot.configuration import ConfigurationError, load_configuration
+from geopilot.connectivity import ConfiguredSensor, roster_from
 from geopilot.dashboard import DeltaPair, render
 from geopilot.reporting import ReportingError, open_readonly
 
@@ -50,6 +52,13 @@ def build_parser() -> argparse.ArgumentParser:
         dest="while_asserted",
         metavar="STATE_SENSOR",
         help="restrict the delta charts to the moments this state sensor read 1",
+    )
+    parser.add_argument(
+        "--config",
+        help=(
+            "installation TOML; supplies the roster, so a sensor that never reported "
+            "is shown as never seen instead of being invisible"
+        ),
     )
     parser.add_argument("--title", default="GeoPilot", help="heading for the page")
     parser.add_argument(
@@ -85,6 +94,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"error: {error}", file=sys.stderr)
         return EXIT_USAGE
 
+    roster: tuple[ConfiguredSensor, ...] = ()
+    if arguments.config:
+        try:
+            roster = roster_from(load_configuration(Path(arguments.config)))
+        except ConfigurationError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return EXIT_USAGE
+
     output = Path(arguments.output)
     if output.exists() and not arguments.force:
         print(f"error: {output} already exists; pass --force to replace it", file=sys.stderr)
@@ -103,6 +120,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             deltas=deltas,
             while_asserted=arguments.while_asserted,
             generated_at=datetime.now(UTC).astimezone(),
+            roster=roster,
         )
     except ReportingError as error:
         print(f"error: {error}", file=sys.stderr)

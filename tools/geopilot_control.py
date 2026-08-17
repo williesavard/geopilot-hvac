@@ -29,6 +29,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from geopilot.configuration import ConfigurationError, InstallationConfig, load_configuration
+from geopilot.connectivity import roster_from
 from geopilot.control import ControlPolicy
 from geopilot.control_server import ControlSurface, build_service, serve
 from geopilot.dashboard import DeltaPair, render
@@ -203,6 +204,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 title=arguments.title,
                 deltas=deltas,
                 control_token=token,
+                roster=roster_from(config),
             )
         finally:
             connection.close()

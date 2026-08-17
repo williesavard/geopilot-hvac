@@ -23,10 +23,16 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from importlib import resources
 from typing import Any
 
+from geopilot.connectivity import (
+    ConfiguredSensor,
+    Presence,
+    by_source,
+    presence,
+)
 from geopilot.ingestion import STATE_UNIT
 from geopilot.reporting import (
     Bucket,
@@ -70,6 +76,7 @@ def render(
     while_asserted: str | None = None,
     generated_at: datetime | None = None,
     control_token: str | None = None,
+    roster: tuple[ConfiguredSensor, ...] = (),
 ) -> str:
     """Build the page. Returns HTML; writes nothing.
 
@@ -77,6 +84,10 @@ def render(
     static file written by `tools/geopilot_dashboard.py` — the controls are not
     merely hidden, they are **not rendered at all**, because a file has no back
     channel and a button that cannot work is worse than no button.
+
+    `roster` is what the configuration says should exist. Without it the page can
+    only report sensors that produced a reading, and a probe wired to the wrong
+    terminal is invisible rather than red.
     """
 
     sensors = coverage(connection)
@@ -88,6 +99,11 @@ def render(
 
     if control_token is not None:
         sections.append(_control_section())
+
+    if roster:
+        sections.append(
+            _connection_section(connection, roster, generated_at or _now())
+        )
 
     sections.append(_health_section(sensors))
 
@@ -160,6 +176,105 @@ and it has rested long enough. Every attempt is recorded, refusals included.</p>
 """
 
 
+PRESENCE_COLOURS = {
+    Presence.LIVE: "good",
+    Presence.NEW: "good",
+    Presence.LATE: "warn",
+    Presence.SILENT: "bad",
+    Presence.NEVER: "bad",
+    Presence.UNCONFIGURED: "warn",
+}
+
+PRESENCE_WORDS = {
+    Presence.LIVE: "connected",
+    Presence.NEW: "just started",
+    Presence.LATE: "late",
+    Presence.SILENT: "stopped",
+    Presence.NEVER: "never seen",
+    Presence.UNCONFIGURED: "not configured",
+}
+
+
+def _connection_section(
+    connection: sqlite3.Connection,
+    roster: tuple[ConfiguredSensor, ...],
+    now: datetime,
+) -> str:
+    """What is wired, what is talking, and what was never heard from.
+
+    Ordered worst first. The row you need is the one you did not expect to see,
+    and making somebody scan a green list for it is a poor way to spend an
+    evening in a basement.
+    """
+
+    verdicts = presence(connection, roster, now=now)
+    order = {
+        Presence.NEVER: 0,
+        Presence.SILENT: 1,
+        Presence.LATE: 2,
+        Presence.UNCONFIGURED: 3,
+        Presence.NEW: 4,
+        Presence.LIVE: 5,
+    }
+    verdicts = tuple(sorted(verdicts, key=lambda item: (order[item.presence], item.sensor_id)))
+
+    rows = "".join(
+        "<tr>"
+        f"<td><span class='status {PRESENCE_COLOURS[item.presence]}'></span>"
+        f"<strong>{_escape(item.sensor_id)}</strong>"
+        + (f"<br><span class='subtitle'>{_escape(item.name)}</span>" if item.name else "")
+        + "</td>"
+        f"<td>{_escape(PRESENCE_WORDS[item.presence])}</td>"
+        f"<td>{_escape(item.source_id or '—')}</td>"
+        f"<td>{item.count:,}</td>"
+        f"<td>{_escape(_duration(item.since_last) if item.since_last else '—')}</td>"
+        f"<td class='detail'>{_escape(item.detail)}</td>"
+        "</tr>"
+        for item in verdicts
+    )
+
+    buses = "".join(
+        "<li>"
+        f"<span class='status {PRESENCE_COLOURS[bus.presence]}'></span>"
+        f"<strong>{_escape(bus.source_id)}</strong> — "
+        f"{bus.healthy} of {bus.total} reporting"
+        + (f". {_escape(bus.detail)}" if bus.detail else "")
+        + "</li>"
+        for bus in by_source(verdicts)
+    )
+
+    troubled = sum(1 for item in verdicts if not item.healthy)
+    headline = (
+        "Everything the configuration lists is reporting."
+        if not troubled
+        else f"{troubled} of {len(verdicts)} need attention."
+    )
+
+    return f"""
+<h2>What is connected</h2>
+<p class="subtitle">{headline} Every sensor the configuration expects is listed,
+including the ones that have never said anything.</p>
+<div class="card">
+  <ul class="buses">{buses}</ul>
+</div>
+<div class="card scroll">
+  <table>
+    <thead><tr>
+      <th>sensor</th><th>state</th><th>bus</th><th>readings</th>
+      <th>silent for</th><th>what to check</th>
+    </tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</div>
+<p class="caveat">A sensor is judged against <em>its own</em> usual interval:
+late past three of them, stopped past ten. <strong>Never seen</strong> means the
+configuration expects it and the database has never held a single reading from
+it — the wiring, the address or the device id. When every sensor on one bus is
+quiet, suspect the bus, not the sensors. None of this touches the equipment: it
+is read from the recording, so it is only ever as fresh as the last poll.</p>
+"""
+
+
 def _health_section(sensors: tuple[Any, ...]) -> str:
     rows = []
     for report in sensors:
@@ -176,8 +291,9 @@ def _health_section(sensors: tuple[Any, ...]) -> str:
         )
 
     return f"""
-<h2>Is it still recording?</h2>
-<p class="subtitle">The first question, and the one no alert will answer for you.</p>
+<h2>How much history</h2>
+<p class="subtitle">What is in the recording, and where the holes are. Whether a
+sensor is talking <em>now</em> is the section above.</p>
 <div class="card scroll">
   <table>
     <thead><tr>
@@ -398,6 +514,10 @@ def _duration(span: timedelta) -> str:
     if seconds < 86400:
         return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
     return f"{seconds // 86400}d {(seconds % 86400) // 3600}h"
+
+
+def _now() -> datetime:
+    return datetime.now(UTC).astimezone()
 
 
 def _asset(name: str) -> str:
