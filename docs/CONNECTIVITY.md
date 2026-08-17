@@ -84,11 +84,10 @@ this runs on.
 configuration, so it costs nothing and cannot disturb acquisition — and it is
 only ever **as fresh as the last poll**. Wire something, wait one cycle, refresh.
 
-A live probe — asking a device to answer *right now* rather than inferring it
-from history — would shorten that loop to seconds and is the obvious next step.
-It is not here because it means holding the serial port, which the acquisition
-timer also wants every minute, and that contention deserves its own decision
-rather than being smuggled in behind a refresh button.
+For a device asked to answer *right now* rather than inferred from history, use
+[Live Probe](PROBE.md) — `tools/geopilot_probe.py`, or the button on the served
+page. That shortens the loop from a poll interval to a second, and it discovers
+1-Wire probes the configuration does not mention yet.
 
 **It does not check that a reading is correct.** A DS18B20 wired to the wrong
 terminal but still on the bus reports 85 °C, which is a power-on-reset value and

@@ -95,6 +95,13 @@ class TargetView:
 StateReader = Callable[[str], bool | None]
 """Reads a target's actual coil back from the bus. None when unreachable."""
 
+Prober = Callable[[], list[dict[str, Any]]]
+"""Reads every configured sensor from the hardware right now.
+
+Injected rather than built here, because probing needs serial ports and this
+module deliberately knows nothing about them.
+"""
+
 PageBuilder = Callable[[str], str]
 """Builds the HTML for the surface, given the session token."""
 
@@ -113,6 +120,7 @@ class ControlSurface:
         *,
         page: PageBuilder,
         read_state: StateReader | None = None,
+        probe: Prober | None = None,
         token: str | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -120,6 +128,7 @@ class ControlSurface:
         self._policy = policy
         self._page = page
         self._read_state = read_state
+        self._probe = probe
         self._token = token or secrets.token_urlsafe(32)
         self._clock = clock or _utc_now
 
@@ -174,6 +183,33 @@ class ControlSurface:
             ],
             "journal": [record.to_dict() for record in self.recent()],
         }
+
+    def probe(self) -> tuple[HTTPStatus, dict[str, Any]]:
+        """Read every configured sensor from the hardware, now.
+
+        A read, not a command, so it does not go through the guard — but it does
+        go through the same doorway, because it holds the serial port for a
+        moment and anything that can do that should have to prove it loaded the
+        page.
+
+        A bus fault is the answer, not an exception: the whole point is to find
+        out what is broken.
+        """
+
+        if self._probe is None:
+            return HTTPStatus.NOT_IMPLEMENTED, {
+                "error": "this surface was started without a prober"
+            }
+
+        try:
+            results = self._probe()
+        except Exception as error:  # noqa: BLE001 - a bus fault is the answer here
+            return HTTPStatus.OK, {
+                "results": [],
+                "error": f"the probe itself failed: {error}",
+            }
+
+        return HTTPStatus.OK, {"results": results, "probed_at": self._clock().isoformat()}
 
     def recent(self, limit: int = 20) -> tuple[CommandRecord, ...]:
         """The last few command attempts, newest last."""
@@ -268,7 +304,18 @@ def build_handler(surface: ControlSurface) -> type[BaseHTTPRequestHandler]:
             self._json(HTTPStatus.NOT_FOUND, {"error": "no such resource"})
 
         def do_POST(self) -> None:  # noqa: N802 - http.server's contract
-            if urlsplit(self.path).path != "/api/command":
+            path = urlsplit(self.path).path
+
+            if path == "/api/probe":
+                if not self._guard():
+                    return
+                # POST because it reaches out to hardware. A GET would be fair
+                # game for a prefetcher, and this one occupies a serial bus.
+                status, body = surface.probe()
+                self._json(status, body)
+                return
+
+            if path != "/api/command":
                 self._json(HTTPStatus.NOT_FOUND, {"error": "no such resource"})
                 return
             if not self._guard():

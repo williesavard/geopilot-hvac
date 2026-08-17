@@ -128,6 +128,23 @@ class OneWireBus(Protocol):
         """Return one probe reading."""
 
 
+class OneWireInventory(Protocol):
+    """A bus that can also say what is on it.
+
+    Separate from `OneWireBus` rather than added to it. Acquisition only ever
+    reads devices it was configured to read, and widening the protocol it depends
+    on would oblige every implementation to support a discovery it has no use for
+    — the same reason bit reads got their own transport protocol instead of being
+    bolted onto the register one.
+    """
+
+    def read_temperature(self, device_id: str) -> OneWireReading:
+        """Return one probe reading."""
+
+    def available_devices(self, family: str = ...) -> tuple[str, ...]:
+        """List probe ids present on the bus."""
+
+
 class SysfsOneWireBus:
     """Reads DS18B20 probes through the Linux 1-Wire sysfs interface.
 

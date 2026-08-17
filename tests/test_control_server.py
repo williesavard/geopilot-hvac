@@ -273,3 +273,65 @@ def test_the_page_is_built_on_the_thread_that_asks_for_it() -> None:
     worker.join()
 
     assert seen == [f"<html>{TOKEN}</html>"]
+
+
+def test_a_probe_is_returned_through_the_surface() -> None:
+    made = ControlSurface(
+        ControlService(ControlPolicy()),
+        ControlPolicy(),
+        page=lambda token: token,
+        probe=lambda: [{"label": "28-aaaa", "value": 21.5, "ok": True}],
+        token=TOKEN,
+        clock=lambda: NOW,
+    )
+
+    status, body = made.probe()
+
+    assert status is HTTPStatus.OK
+    assert body["results"][0]["label"] == "28-aaaa"
+    assert "probed_at" in body
+
+
+def test_probing_works_while_control_is_disabled() -> None:
+    """Probing is a read, and a disabled surface is where it matters most."""
+
+    made = ControlSurface(
+        ControlService(ControlPolicy(enabled=False)),
+        ControlPolicy(enabled=False),
+        page=lambda token: token,
+        probe=lambda: [{"label": "28-aaaa", "ok": True}],
+        token=TOKEN,
+    )
+
+    status, body = made.probe()
+
+    assert status is HTTPStatus.OK
+    assert body["results"]
+
+
+def test_a_probe_that_blows_up_becomes_an_answer() -> None:
+    """Finding out what is broken is the point; crashing is not an answer."""
+
+    def explode() -> list[dict[str, object]]:
+        raise OSError("[Errno 16] Device or resource busy")
+
+    made = ControlSurface(
+        ControlService(ControlPolicy()),
+        ControlPolicy(),
+        page=lambda token: token,
+        probe=explode,
+        token=TOKEN,
+    )
+
+    status, body = made.probe()
+
+    assert status is HTTPStatus.OK
+    assert body["results"] == []
+    assert "busy" in str(body["error"])
+
+
+def test_a_surface_without_a_prober_says_so() -> None:
+    status, body = surface().probe()
+
+    assert status is HTTPStatus.NOT_IMPLEMENTED
+    assert "without a prober" in str(body["error"])
