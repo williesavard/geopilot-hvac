@@ -95,7 +95,7 @@ def test_the_styles_and_script_are_inlined(tmp_path: Path) -> None:
 def test_every_sensor_appears_in_the_health_table(tmp_path: Path) -> None:
     page = render(recorded(tmp_path))
 
-    assert "Is it still recording?" in page
+    assert "How much history" in page
     for sensor_id in ("sensor_loop_in", "sensor_loop_out", "sensor_compressor"):
         assert sensor_id in page
 

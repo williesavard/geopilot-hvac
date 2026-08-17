@@ -33,7 +33,11 @@ no second thing that can be down when you need the data.
 
 ## What is on it
 
-**Is it still recording?** — every sensor, its reading count, its span, its
+**What is connected** — every sensor the configuration expects, whether or not
+it has ever reported, worst first. See [Connectivity](CONNECTIVITY.md); this is
+the section you use while wiring, and it needs `--config`.
+
+**How much history** — every sensor with data: its reading count, its span, its
 largest gap and when it was last seen, with a dot: green, amber past an hour of
 missing history, red past a day or a tenth of everything recorded. Both tests
 are needed. Fourteen hours missing from a fortnight is only four percent, and a
