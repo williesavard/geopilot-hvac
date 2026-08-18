@@ -47,7 +47,7 @@ from geopilot.onewire import (
     OneWireErrorCode,
     OneWireInventory,
 )
-from geopilot.register_decoder import RegisterDataType
+from geopilot.register_decoder import RegisterDecoderError, decode_words
 
 
 class ProbeKind(StrEnum):
@@ -212,7 +212,7 @@ def probe_registers(
                 detail=(
                     f"raw {' '.join(f'0x{word:04X}' for word in words)}"
                     if value is not None
-                    else f"{read.quantity} word(s) cannot be decoded as {read.data_type}"
+                    else f"{len(words)} word(s) cannot be decoded as {read.data_type}"
                 ),
             )
         )
@@ -222,17 +222,18 @@ def probe_registers(
 def _decode(words: tuple[int, ...], read: RegisterReadConfig) -> float | None:
     """Apply the configured data type, scale and offset.
 
+    Delegates to the acquisition decoder rather than repeating it, so a probe
+    and a recorded reading can never disagree about the same register.
+
     Returns None rather than guessing when the words do not fit the declared
     type — a wrong quantity in the configuration is exactly the mistake a probe
     should surface, not paper over.
     """
 
-    if len(words) != 1:
+    try:
+        return decode_words(words, read.data_type) * read.scale + read.offset
+    except RegisterDecoderError:
         return None
-    raw = words[0]
-    if read.data_type is RegisterDataType.INT16 and raw > 0x7FFF:
-        raw -= 0x10000
-    return raw * read.scale + read.offset
 
 
 def probe_bits(

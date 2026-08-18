@@ -54,6 +54,13 @@ timeout = 1.0
 # with values from the device manual, and record where they came from in
 # source_reference. A read whose source_reference is vague is a read nobody can
 # audit later.
+#
+# data_type is one of uint16, int16, float32 or float32_swapped. Energy meters
+# almost always answer in 32-bit floats spanning two registers, which needs
+# quantity = 2. The two float types differ only in word order, and Modbus does
+# not standardise it: if the values come out as absurd magnitudes, try the
+# other one. tools/geopilot_probe.py prints the raw words beside the decoded
+# value so the choice can be checked rather than assumed.
 id = "read_bench_temperature"
 source_id = "source_bench_bus"
 sensor_id = "sensor_bench_temperature"
