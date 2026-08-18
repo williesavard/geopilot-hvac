@@ -85,6 +85,7 @@ rules and first tested code path.
 - `docs/PROBE.md`
 - `docs/PORT_LOCK.md`
 - `docs/CALIBRATION.md`
+- `docs/COMMISSIONING.md`
 - `docs/CONTROL_SURFACE_ADR.md`
 - `docs/hardware.md`
 - `docs/hardware/README.md`
