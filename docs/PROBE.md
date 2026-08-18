@@ -65,6 +65,19 @@ different places.
 0xFFCE, which unsigned is 6553.4 °C. Getting `int16` versus `uint16` wrong in the
 configuration is a mistake that only shows up in winter, and this shows it now.
 
+**The raw words are printed beside the decoded value**, which is how a 32-bit
+float's word order gets settled. Modbus defines the order of bytes within a
+register and says nothing about the order of registers within a 32-bit value, so
+`float32` and `float32_swapped` both exist and only the device knows which it
+is. Decoded with the wrong one, 200.0 becomes 2.9e-41 — obviously wrong — but
+4.2 kW can land on something that passes for a reading. The words let you check
+instead of assume.
+
+**One decoder, so a probe cannot disagree with the recording.** Probing
+delegates to the same code acquisition uses; a second implementation would drift
+and the first symptom would be a probe that contradicts the database about the
+same register.
+
 **A configured quantity the declared type cannot hold is refused, not guessed.**
 Two words presented as an `int16` produce no value and say so.
 

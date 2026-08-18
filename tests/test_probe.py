@@ -6,6 +6,7 @@ rather than a Raspberry Pi, so none of them needs Linux either.
 
 from __future__ import annotations
 
+import struct
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -28,7 +29,7 @@ from geopilot.probe import (
     probe_onewire,
     probe_registers,
 )
-from geopilot.register_decoder import RegisterDataType
+from geopilot.register_decoder import RegisterDataType, decode_words
 
 STAMP = datetime(2026, 8, 17, 12, 0, tzinfo=UTC)
 
@@ -318,3 +319,73 @@ def test_a_label_falls_back_to_the_bus_reference(tmp_path: Path) -> None:
     bus = SysfsOneWireBus(w1_tree(tmp_path, {"28-aaaa": 3.0}))
 
     assert probe_onewire(bus, ())[0].label == "28-aaaa"
+
+
+def test_a_probe_decodes_a_float32_meter_register() -> None:
+    """Every Eastron meter answers in 32-bit floats across two registers."""
+
+    read = RegisterReadConfig(
+        read_id="read_power",
+        source_id="source_bus",
+        sensor_id="sensor_heat_pump_power",
+        unit_id=1,
+        register_kind=ModbusRegisterKind.INPUT,
+        address=0x0034,
+        quantity=2,
+        data_type=RegisterDataType.FLOAT32,
+        unit="W",
+        scale=1.0,
+        offset=0.0,
+        source_reference="SDM630 Modbus protocol, total system power",
+    )
+    transport = FakeModbusTransport(
+        responses=(
+            ModbusReadResponse(
+                request_id="probe-read_power",
+                words=struct.unpack(">HH", struct.pack(">f", 4235.5)),
+                observed_at=STAMP,
+            ),
+        )
+    )
+
+    result = probe_registers(lambda source_id: transport, (read,))[0]
+
+    assert result.ok
+    assert result.value == pytest.approx(4235.5)
+    assert result.unit == "W"
+
+
+def test_the_probe_and_the_decoder_agree_on_every_type() -> None:
+    """One decoder, so a probe cannot disagree with the recording it previews."""
+
+    for data_type, words in (
+        (RegisterDataType.INT16, (0xFFCE,)),
+        (RegisterDataType.UINT16, (0x00D7,)),
+        (RegisterDataType.FLOAT32, (0x4348, 0x0000)),
+        (RegisterDataType.FLOAT32_SWAPPED, (0x0000, 0x4348)),
+    ):
+        read = RegisterReadConfig(
+            read_id="read_x",
+            source_id="source_bus",
+            sensor_id="sensor_x",
+            unit_id=1,
+            register_kind=ModbusRegisterKind.INPUT,
+            address=0,
+            quantity=len(words),
+            data_type=data_type,
+            unit="W",
+            scale=1.0,
+            offset=0.0,
+            source_reference="test",
+        )
+        transport = FakeModbusTransport(
+            responses=(
+                ModbusReadResponse(request_id="probe-read_x", words=words, observed_at=STAMP),
+            )
+        )
+
+        def bus_for(source_id: str, bus: FakeModbusTransport = transport) -> FakeModbusTransport:
+            return bus
+
+        probed = probe_registers(bus_for, (read,))[0].value
+        assert probed == pytest.approx(decode_words(words, data_type))
