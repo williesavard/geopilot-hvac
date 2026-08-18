@@ -88,6 +88,7 @@ rules and first tested code path.
 - `docs/COMMISSIONING.md`
 - `docs/ENERGY_COST.md`
 - `docs/CONTROL_SURFACE_ADR.md`
+- `docs/COMMAND_JOURNAL_STORAGE.md`
 - `docs/hardware.md`
 - `docs/hardware/README.md`
 - repository governance files

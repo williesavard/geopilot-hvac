@@ -49,6 +49,7 @@ from geopilot.modbus_write import ModbusCoilWriteRequest, ModbusWriteError
 from geopilot.onewire import SysfsOneWireBus
 from geopilot.probe import ProbeResult, probe_bits, probe_onewire, probe_registers
 from geopilot.reporting import ReportingError, open_readonly
+from geopilot.sqlite_journal import JournalStorageError, SqliteCommandJournal
 
 EXIT_OK = 0
 EXIT_USAGE = 1
@@ -76,6 +77,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="SENSOR:MINUS",
         help="chart the difference between two sensors; repeatable",
+    )
+    parser.add_argument(
+        "--journal",
+        help=(
+            "path to the command journal; defaults to commands.sqlite3 beside the "
+            "measurements database. Kept separate so retention cannot prune an audit trail"
+        ),
     )
     parser.add_argument("--title", default="GeoPilot", help="heading for the page")
     return parser
@@ -265,9 +273,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             for item in results
         ]
 
+    journal_path = (
+        Path(arguments.journal)
+        if arguments.journal
+        else Path(config.database).with_name("commands.sqlite3")
+    )
+    try:
+        journal = SqliteCommandJournal(journal_path)
+    except JournalStorageError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return EXIT_USAGE
+
     bus = SerialBus(config)
     surface = ControlSurface(
-        build_service(config.control, bus),
+        build_service(config.control, bus, journal=journal),
         config.control,
         page=page,
         read_state=bus.read_state,
@@ -276,6 +295,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     server = serve(surface, host=arguments.bind, port=arguments.port)
     _announce(arguments.bind, arguments.port, config.control)
+    print(f"command journal: {journal_path} ({journal.count():,} recorded)")
 
     try:
         server.serve_forever()
@@ -283,6 +303,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("\nstopping")
     finally:
         server.server_close()
+        journal.close()
 
     return EXIT_OK
 

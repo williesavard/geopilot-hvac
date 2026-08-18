@@ -114,9 +114,8 @@ sends it to be journalled.
   already running on the Pi defeats all four — it can read the token from the
   process or write the configuration;
 - `--bind` exists and is a foot-gun. It warns; it does not refuse;
-- the audit journal is in memory. It is lost on restart, which is acceptable for
-  a surface used by hand and is **not** acceptable once anything automatic
-  issues commands.
+- ~~the audit journal is in memory~~ — resolved. It is now on disk, in its own
+  file, append only; see [Command Journal Storage](COMMAND_JOURNAL_STORAGE.md).
 
 ### Explicitly out of scope
 
@@ -146,7 +145,9 @@ Accept when a reviewer confirms:
 
 ## Follow-Up Work
 
-1. A persistent command journal, before anything automatic can issue commands.
+1. ~~A persistent command journal~~ — done; see
+   [Command Journal Storage](COMMAND_JOURNAL_STORAGE.md). It also fixed a rate
+   limit that a restart could erase.
 2. A systemd unit for the surface, with `--bind` fixed to loopback.
 3. An ADR for automatic control, which is where the interesting safety questions
    actually live.
