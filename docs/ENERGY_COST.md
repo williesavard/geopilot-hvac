@@ -140,14 +140,27 @@ are where comparisons usually go wrong: energy content, then efficiency.
 | Natural gas, condensing¹ | 6.06 | 2 802 $ |
 | Natural gas, non-condensing¹ | 7.20 | 3 328 $ |
 | Electric resistance | 11.14 | 5 153 $ |
+| **Propane, condensing, at 1,267 $/L** | **18.97** | **8 773 $** |
+| Propane, non-condensing, at 1,267 $/L | 22.53 | 10 419 $ |
 | Heating oil | 22.82 | 10 553 $ |
-| **Propane, condensing, at 2,15 $/L** | **32.19** | **14 888 $** |
-| **Propane, condensing, at 2,55 $/L** | **38.18** | **17 658 $** |
 
 ¹ Natural gas is listed for completeness and is not available at this address.
 
-Propane is the **most expensive** option on the list: nine times a COP 3 heat
-pump, three times electric resistance, and half again more than oil.
+At the **actual Nutrinor price of 126,7 ¢/L**, propane sits between electric
+resistance and oil: cheaper than oil, but still **1,7 times** electric
+resistance and **5 times** a COP 3 heat pump.
+
+### The estimate was 1,7 times too high
+
+An earlier revision of this document used 2,15–2,55 $/L, taken from a secondary
+source with an interest in the answer, and concluded that propane was the most
+expensive option on the list by a wide margin. **The real invoice price is
+1,267 $/L**, and propane is in fact cheaper than oil.
+
+The conclusion did not survive contact with a bill, which is exactly what the
+"no default, bring an invoice" rule below was written for — and a reminder that
+a plausible secondary source produced an error large enough to reorder the
+table.
 
 ### Propane has no published price, and that is a design constraint
 
@@ -163,9 +176,12 @@ apart and neither is wrong.
 
 So `propane_price` **has no default and requires one**, and it carries the
 supplier and the invoice date with it. A baked-in figure would look like a
-citation and be a guess. The 2,15–2,55 $/L used above is a regional estimate
-from a secondary source with an interest in the answer; **replace it with a
-Nutrinor invoice** before it decides anything.
+citation and be a guess.
+
+The figure used above, 1,267 $/L, is an owner-reported Nutrinor price as of
+18 August 2026. Confirm it against a bill before it decides anything, and check
+whether it is before or after the patronage rebate — a cooperative's effective
+price is lower than its posted one.
 
 ### The litre trap
 
@@ -205,13 +221,14 @@ which **flatters combustion** against the heat pump in every row above.
 
 **No fossil backup makes Rate DT worth having here.** The dual-energy rate's
 cheap tier only pays if the cold hours are carried by a fossil fuel, and both
-fuels actually available cost more per unit of heat than Rate D charges for
-resistance electricity — oil twice over, propane three times. The rate is a
-saving on paper that the fuel undoes, and with propane it undoes it twice.
+fuels available cost more per unit of heat than Rate D charges for resistance
+electricity — oil at twice, propane at 1,7 times even at the real price. The
+rate is a saving on paper that the fuel undoes.
 
-**Propane is a poor backup on cost alone**, before any question of the equipment
-to burn it in. If a replacement design proposes a propane stage, the case for it
-has to be made on capacity or resilience, not on running cost.
+**Propane still loses to the machine already installed.** At 18,97 ¢ it is
+nearly twice what the existing electric second stage costs to run, and five
+times a working heat pump. If a replacement design proposes a propane stage, the
+case has to be made on capacity or resilience — not on running cost.
 
 **Natural gas is not available at this address** — the network here is propane.
 It stays in the table only as a reference point, and as a reminder that a
