@@ -86,6 +86,33 @@ sensors — and COP 3 is an assumption about a machine nobody has chosen. What
 the table does show is the shape: the answer scales linearly with the share, so
 the measurement is the thing that decides, and a year of it costs one meter.
 
+## Which rate applies is a question, not an assumption
+
+**Rate D *is* the standard residential rate.** A Québec home that has not
+specifically signed up for dual energy or Flex D is on it; there is no separate
+"normal" rate underneath.
+
+But a multi-unit building's mechanical room is often metered separately, and a
+separate meter serving common equipment is not automatically domestic. If it is
+on **Rate G**, article 3.2, the structure is the reverse of Rate D:
+
+| | Rate D | Rate G |
+| --- | --- | --- |
+| Access | 46,154 ¢/day | 15,426 $/month |
+| Tiers | cheap first, 40 kWh/day | **expensive first**, 15 090 kWh/month |
+| First tier | 7,065 ¢ | 12,388 ¢ |
+| Beyond | 11,142 ¢ | **9,534 ¢** |
+| Demand | none | 22,071 $/kW past 50 kW |
+
+For a large heating load the marginal price on Rate G is **9,534 ¢ — below Rate
+D's 11,142 ¢**. Rate G also carries a demand charge on the highest power drawn,
+under which a machine that draws hard for fifteen minutes costs the same as one
+that draws hard all month.
+
+**Read the rate code off the bill for the meter the heat pump is actually on.**
+Every dollar figure in this document assumes Rate D, and the answer moves by
+about 14 % at the margin if that assumption is wrong.
+
 ## Rate DT is not the saving it looks like
 
 Mild-weather energy at 5,131 ¢ is less than half of Rate D's second tier. It is
@@ -99,6 +126,66 @@ year running.
 
 Whether a replacement should be designed to qualify is an engineering and fuel
 question, not a software one.
+
+## The other fuels, on one scale
+
+Comparing heating options means comparing **one kilowatt-hour of heat inside
+the house**. Getting there from a posted price takes two conversions, and both
+are where comparisons usually go wrong: energy content, then efficiency.
+
+| Option | ¢ per useful kWh | On 46 246 kWh |
+| --- | ---: | ---: |
+| Heat pump, COP 3 | **3.71** | 1 718 $ |
+| Heat pump, COP 2 | 5.57 | 2 576 $ |
+| Natural gas, condensing | 6.06 | 2 802 $ |
+| Natural gas, non-condensing | 7.20 | 3 328 $ |
+| Electric resistance | 11.14 | 5 153 $ |
+| **Heating oil** | **22.82** | **10 553 $** |
+
+Oil is **6.1 times** a COP 3 heat pump and **twice** electric resistance.
+
+### Where those come from
+
+**Heating oil: 205,80 ¢/L.** Régie de l'énergie du Québec, weekly survey, week
+of 17 August 2026, region 02 Saguenay–Lac-Saint-Jean, current-season average,
+before discount. A season average rather than the latest week, because heating
+happens over a season — the most recent weekly figure was 210,07 ¢/L and the
+provincial weighted average 207,60 ¢/L, so this is not a favourable pick.
+Energy content 38,2 MJ/L = 10,61 kWh/L, at 85 %.
+
+**Natural gas: 59,983 ¢/m³**, the sum of five separately published components
+from Énergir's *Conditions de service et Tarif* — distribution 34,015 ¢
+(art. 14.2.2.2), transport 2,833 ¢ (12.1.2.1.1), load balancing 5,122 ¢
+(13.1.2.1), supply 9,814 ¢ (11.1.2.1) and SPEDE 8,199 ¢ (15.1.2.1). Energy
+content 37,5 MJ/m³ = 10,42 kWh/m³.
+
+**The gas figure is the least trustworthy number in this project.** The supply
+component is adjusted *monthly* — Énergir published 15,611 ¢/m³ for June 2026
+against the 9,814 ¢ in the retrieved document, a change larger than the entire
+carbon charge — and the edition obtained was December 2024 where a December
+2025 edition exists. Treat it as a correct *structure* with a stale supply
+price, and use a recent bill in preference.
+
+The efficiencies are nameplate figures with no duct, cycling or chimney losses,
+which **flatters combustion** against the heat pump in every row above.
+
+### Two things this settles
+
+**Converting to oil to qualify for Rate DT does not work at these prices.** Rate
+DT's cheap tier only pays if the cold hours are carried by a fossil backup, and
+oil at 22,82 ¢ per useful kWh is more than twice what Rate D charges for
+resistance heat. The dual-energy rate is a saving on paper that the fuel
+undoes.
+
+**Natural gas is close to a mediocre heat pump and beaten by a good one.** A
+COP 2 machine is already cheaper than condensing gas here. That is before
+asking the prior question:
+
+**Is there a gas main on the street?** Énergir's *transmission* network crosses
+Lac-Saint-Jean municipalities, which is not the same thing as a *distribution*
+service at an address — a high-pressure pipeline passing through the
+municipality connects nothing. Énergir answers this by address, and it should be
+asked before any of the gas arithmetic above is given weight.
 
 ## Using it
 

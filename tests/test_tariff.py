@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import date
 
 import pytest
-from geopilot.tariff import RATE_D, RATE_DT, TariffError
+from geopilot.tariff import RATE_D, RATE_DT, RATE_G, TariffError
 
 
 def test_the_published_prices_are_carried_exactly() -> None:
@@ -136,3 +136,35 @@ def test_every_rate_carries_the_document_it_came_from() -> None:
     for rate in (RATE_D, RATE_DT):
         assert "Hydro-Québec" in rate.source
         assert "2026" in rate.source
+
+
+def test_the_general_rate_has_inverted_tiers() -> None:
+    """Rate G's first 15 090 kWh are the expensive ones, unlike Rate D."""
+
+    assert RATE_G.first_tier_price > RATE_G.second_tier_price
+    assert RATE_D.first_tier_price < RATE_D.second_tier_price
+
+
+def test_a_large_load_is_cheaper_at_the_margin_on_the_general_rate() -> None:
+    """Which is why the rate a separate meter sits on has to be checked."""
+
+    assert RATE_G.marginal_price(20_000.0) < RATE_D.second_tier_price
+    assert RATE_G.marginal_price(20_000.0) == pytest.approx(0.09534)
+
+
+def test_a_small_load_is_dearer_at_the_margin_on_the_general_rate() -> None:
+    assert RATE_G.marginal_price(1_000.0) > RATE_D.second_tier_price
+
+
+def test_the_general_rate_prices_are_carried_exactly() -> None:
+    """15,426 $/month, 22,071 $/kW past 50 kW. Article 3.2."""
+
+    assert RATE_G.access_per_month == 15.426
+    assert RATE_G.demand_price_per_kw == 22.071
+    assert RATE_G.demand_threshold_kw == 50.0
+    assert RATE_G.first_tier_kwh_per_month == 15_090.0
+
+
+def test_negative_consumption_is_refused_on_the_general_rate() -> None:
+    with pytest.raises(TariffError, match="cannot be negative"):
+        RATE_G.marginal_price(-1.0)
