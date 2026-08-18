@@ -25,6 +25,7 @@ from geopilot.modbus_transport import (
     ModbusTransportErrorCode,
     unpack_bits,
 )
+from geopilot.port_lock import PortBusyError, PortLock
 
 
 class SerialPort(Protocol):
@@ -78,14 +79,30 @@ class PySerialModbusTransport:
         *,
         serial_factory: SerialFactory | None = None,
         clock: TransportClock = _utc_now,
+        lock: PortLock | None = None,
     ) -> None:
         self._config = config
         self._clock = clock
         self._serial = open_serial_port(config, serial_factory=serial_factory)
+        self._lock = lock if lock is not None else PortLock(config.port)
 
     def read_registers(self, request: ModbusReadRequest) -> ModbusReadResponse:
-        """Read raw register words for one holding or input register request."""
+        """Read raw register words for one holding or input register request.
 
+        The exchange is held under an advisory lock on the port, so a second
+        GeoPilot process cannot write its own request between this one and its
+        answer. See `port_lock`.
+        """
+
+        try:
+            with self._lock.hold():
+                return self._exchange(request)
+        except PortBusyError as error:
+            raise _transport_error(
+                ModbusTransportErrorCode.CONNECTION_FAILED, str(error), request
+            ) from error
+
+    def _exchange(self, request: ModbusReadRequest) -> ModbusReadResponse:
         function_code = _function_code(request.register_kind)
         frame = _append_crc(
             bytes(
@@ -321,7 +338,7 @@ def calculate_crc(frame: bytes) -> int:
 def _transport_error(
     code: ModbusTransportErrorCode,
     message: str,
-    request: ModbusReadRequest,
+    request: ModbusReadRequest | ModbusBitReadRequest,
 ) -> ModbusTransportError:
     return ModbusTransportError(
         code=code,
@@ -361,6 +378,7 @@ class PySerialModbusBitTransport:
         serial_port: SerialPort | None = None,
         serial_factory: SerialFactory | None = None,
         clock: TransportClock = _utc_now,
+        lock: PortLock | None = None,
     ) -> None:
         self._config = config
         self._clock = clock
@@ -368,10 +386,20 @@ class PySerialModbusBitTransport:
             self._serial = serial_port
         else:
             self._serial = open_serial_port(config, serial_factory=serial_factory)
+        self._lock = lock if lock is not None else PortLock(config.port)
 
     def read_bits(self, request: ModbusBitReadRequest) -> ModbusBitReadResponse:
-        """Read a run of bits and unpack them."""
+        """Read a run of bits and unpack them, holding the bus for the exchange."""
 
+        try:
+            with self._lock.hold():
+                return self._exchange(request)
+        except PortBusyError as error:
+            raise _transport_error(
+                ModbusTransportErrorCode.CONNECTION_FAILED, str(error), request
+            ) from error
+
+    def _exchange(self, request: ModbusBitReadRequest) -> ModbusBitReadResponse:
         function_code = _bit_function_code(request.bit_kind)
         frame = build_bit_read_frame(request)
 

@@ -28,6 +28,7 @@ from geopilot.modbus_write import (
     ModbusWriteError,
     ModbusWriteErrorCode,
 )
+from geopilot.port_lock import PortBusyError, PortLock
 
 TransportClock = Callable[[], datetime]
 
@@ -54,6 +55,7 @@ class PySerialModbusWriteTransport:
         serial_port: SerialPort | None = None,
         serial_factory: SerialFactory | None = None,
         clock: TransportClock = _utc_now,
+        lock: PortLock | None = None,
     ) -> None:
         self._config = config
         self._clock = clock
@@ -61,9 +63,27 @@ class PySerialModbusWriteTransport:
             self._serial = serial_port
         else:
             self._serial = open_serial_port(config, serial_factory=serial_factory)
+        self._lock = lock if lock is not None else PortLock(config.port)
 
     def write_coil(self, request: ModbusCoilWriteRequest) -> ModbusCoilWriteResponse:
-        """Set one coil and verify the device echoed the request exactly."""
+        """Set one coil and verify the device echoed the request exactly.
+
+        This is the exchange the lock matters most for. Reading somebody else's
+        answer to a read is a bad number; reading somebody else's answer to a
+        write is a relay whose position was never actually confirmed.
+        """
+
+        try:
+            with self._lock.hold():
+                return self._exchange(request)
+        except PortBusyError as error:
+            raise ModbusWriteError(
+                code=ModbusWriteErrorCode.CONNECTION_FAILED,
+                message=str(error),
+                request_id=request.request_id,
+            ) from error
+
+    def _exchange(self, request: ModbusCoilWriteRequest) -> ModbusCoilWriteResponse:
 
         frame = build_write_coil_frame(request)
 
