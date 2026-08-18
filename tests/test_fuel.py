@@ -186,8 +186,8 @@ def test_a_propane_price_carries_its_supplier_and_date() -> None:
     assert price.as_of == date(2026, 8, 18)
 
 
-def test_propane_is_the_most_expensive_option_at_regional_prices() -> None:
-    """Around 32 c per useful kWh at 2.15 $/L, condensing."""
+def test_a_high_propane_price_makes_it_the_dearest_option() -> None:
+    """At 2.15 $/L it beats even oil, which is why the real price mattered."""
 
     price = propane_price(2.15, as_of=date(2026, 8, 18), supplier="test")
     propane = fuel_option(price, "propane furnace, condensing")
@@ -197,3 +197,28 @@ def test_propane_is_the_most_expensive_option_at_regional_prices() -> None:
         HEATING_OIL_SAGUENAY, "oil furnace"
     ).cost_per_useful_kwh
     assert propane.cost_per_useful_kwh > 8 * heat_pump_option(3.0).cost_per_useful_kwh
+
+
+def test_the_owner_reported_propane_price_sits_between_resistance_and_oil() -> None:
+    """126,7 ¢/L, Nutrinor, 18 August 2026. The estimate it replaced was 1.7x high."""
+
+    price = propane_price(1.267, as_of=date(2026, 8, 18), supplier="Nutrinor")
+    propane = fuel_option(price, "propane furnace, condensing")
+
+    assert propane.cost_per_useful_kwh == pytest.approx(0.1897, abs=0.001)
+    assert propane.cost_per_useful_kwh > resistance_option().cost_per_useful_kwh
+    assert propane.cost_per_useful_kwh < fuel_option(
+        HEATING_OIL_SAGUENAY, "oil furnace"
+    ).cost_per_useful_kwh
+
+
+def test_propane_still_loses_to_electricity_however_it_is_burnt() -> None:
+    """Which is what keeps Rate DT off the table even at the real price."""
+
+    price = propane_price(1.267, as_of=date(2026, 8, 18), supplier="Nutrinor")
+
+    for equipment in ("propane furnace, condensing", "propane furnace, non-condensing"):
+        assert (
+            fuel_option(price, equipment).cost_per_useful_kwh
+            > resistance_option().cost_per_useful_kwh
+        )
