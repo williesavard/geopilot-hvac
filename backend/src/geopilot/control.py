@@ -231,7 +231,7 @@ class ControlService:
                 now,
             )
 
-        previous = self._last_applied.get(target.target_id)
+        previous = self._remember(target.target_id)
         if previous is not None:
             elapsed = now - previous
             minimum = timedelta(seconds=target.minimum_interval_seconds)
@@ -259,6 +259,36 @@ class ControlService:
 
         self._last_applied[target.target_id] = now
         return self._record(command, CommandStatus.APPLIED, "", now)
+
+    def _remember(self, target_id: str) -> datetime | None:
+        """When this target was last operated, asking the journal if need be.
+
+        The in-process cache is empty after a restart, and a rate limit that
+        resets when the process does is not a rate limit — a relay operated ten
+        seconds before a restart could be operated again immediately after it,
+        which is exactly the chatter the interval exists to prevent.
+
+        A journal that cannot answer simply returns nothing, and the guard
+        behaves as it did before.
+        """
+
+        cached = self._last_applied.get(target_id)
+        if cached is not None:
+            return cached
+
+        ask = getattr(self._journal, "last_applied_at", None)
+        if not callable(ask):
+            return None
+
+        try:
+            remembered = ask(target_id)
+        except Exception:  # noqa: BLE001 - a journal fault must not block a refusal
+            return None
+
+        if isinstance(remembered, datetime):
+            self._last_applied[target_id] = remembered
+            return remembered
+        return None
 
     def _record(
         self,
