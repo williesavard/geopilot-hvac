@@ -1151,3 +1151,64 @@ def test_durations_are_rendered_in_readable_units() -> None:
     assert format_duration(timedelta(minutes=2, seconds=5)) == "2m 5s"
     assert format_duration(timedelta(hours=3, minutes=7)) == "3h 7m"
     assert format_duration(timedelta(days=4, hours=2)) == "4d 2h"
+
+
+def energy_database(tmp_path: Path, readings: tuple[float, ...], unit: str = "kWh") -> Path:
+    """A cumulative meter counter, as a real energy register reports it."""
+
+    database = tmp_path / "energy.sqlite3"
+    with SqliteMeasurementHistorian(database) as historian:
+        for index, value in enumerate(readings):
+            moment = START + timedelta(hours=index)
+            historian.append(
+                Measurement(
+                    id=f"source_bus:sensor_energy:{index}",
+                    sensor_id="sensor_energy",
+                    observed_at=moment,
+                    received_at=moment,
+                    value=value,
+                    unit=unit,
+                    quality=DataQuality.GOOD,
+                    source_id="source_bus",
+                )
+            )
+    return database
+
+
+def test_a_cumulative_counter_is_priced_at_the_marginal_tier(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """1000 kWh at 11.142 c is 111.42 $, and not a blended average."""
+
+    database = energy_database(tmp_path, (5000.0, 5500.0, 6000.0))
+
+    exit_code = main(["--database", str(database), "--sensor", "sensor_energy", "--cost"])
+
+    output = capsys.readouterr().out
+    assert exit_code == EXIT_OK
+    assert "consumed: 1,000.0 kWh" in output
+    assert "111.42 $" in output
+    assert "not a blended average" in output
+    assert "Hydro-Québec" in output
+
+
+def test_pricing_a_rate_instead_of_an_amount_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Watts are a rate. Converting one to an amount needs a duration."""
+
+    database = energy_database(tmp_path, (1000.0, 2000.0), unit="W")
+
+    main(["--database", str(database), "--sensor", "sensor_energy", "--cost"])
+
+    assert "needs a sensor recorded in kWh" in capsys.readouterr().err
+
+
+def test_cost_is_silent_unless_asked_for(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = energy_database(tmp_path, (5000.0, 6000.0))
+
+    main(["--database", str(database), "--sensor", "sensor_energy"])
+
+    assert "$" not in capsys.readouterr().out

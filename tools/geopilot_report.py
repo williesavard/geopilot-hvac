@@ -68,6 +68,7 @@ from geopilot.reporting import (
     summarize,
     summarize_runs,
 )
+from geopilot.tariff import RATE_D
 
 EXIT_OK = 0
 EXIT_USAGE = 1
@@ -160,6 +161,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "how far apart two readings may be and still be paired, default 30s; "
             "keep it under half the polling interval"
+        ),
+    )
+    parser.add_argument(
+        "--cost",
+        action="store_true",
+        help=(
+            "price an energy sensor's consumption at the Rate D marginal tier; "
+            "requires --sensor with a kWh unit"
         ),
     )
     parser.add_argument(
@@ -387,6 +396,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 while_not_asserted=arguments.while_not_asserted,
                 gate=gate,
                 tolerance=tolerance,
+                with_cost=arguments.cost,
             )
         return _report_coverage(connection)
     except ReportingError as error:
@@ -424,6 +434,7 @@ def _report_sensor(
     while_not_asserted: str | None = None,
     gate: str = "",
     tolerance: timedelta = DEFAULT_PAIRING_TOLERANCE,
+    with_cost: bool = False,
 ) -> int:
     summary = summarize(
         connection,
@@ -448,6 +459,9 @@ def _report_sensor(
     print(f"mean   : {summary.mean:g}")
     if summary.excluded:
         print(f"\nexcluded: {summary.excluded:,} readings taken outside that condition")
+
+    if with_cost:
+        _report_cost(summary)
 
     if summary.unit == "state":
         ratio = duty_cycle(connection, sensor_id, start=start, end=end)
@@ -649,6 +663,50 @@ def _print_run_summary(summary: RunSummary) -> None:
             "gap; their durations are lower bounds"
         )
     print()
+
+
+def _report_cost(summary: SensorSummary) -> None:
+    """Price a consumption at the marginal tier, and say why not the average.
+
+    Refuses anything but kWh rather than guessing a conversion: a sensor in
+    watts is a rate, not an amount, and turning one into the other needs a
+    duration this function does not have.
+    """
+
+    if summary.unit.lower() != "kwh":
+        print(
+            f"\n--cost needs a sensor recorded in kWh; {summary.sensor_id} is in "
+            f"{summary.unit}. A rate is not an amount.",
+            file=sys.stderr,
+        )
+        return
+
+    consumed = summary.maximum - summary.minimum
+    if consumed < 0:
+        print(
+            "\nthe meter reading went backwards over this window, so no consumption "
+            "can be derived from it",
+            file=sys.stderr,
+        )
+        return
+
+    marginal = RATE_D.marginal_cost(consumed)
+    print(f"\nconsumed: {consumed:,.1f} kWh  (a cumulative counter, max minus min)")
+    print(f"at the {RATE_D.name} second tier, {RATE_D.second_tier_price * 100:.3f} c/kWh:")
+    print(f"  {marginal:,.2f} $")
+    print(
+        "\nthe second tier, not a blended average: in a house already past "
+        f"{RATE_D.first_tier_kwh_per_day:g} kWh/day these are the last kWh of the day. "
+        "The access charge is excluded because it is paid whether the machine runs "
+        "or not."
+    )
+    print(f"source: {RATE_D.source}")
+    if RATE_D.stale_after(datetime.now(UTC).date()):
+        print(
+            "\nWARNING: these prices are superseded. Hydro-Quebec revises rates every "
+            "1 April; re-read the document before quoting this figure.",
+            file=sys.stderr,
+        )
 
 
 def _sense_words(asserted: bool) -> str:
