@@ -49,6 +49,64 @@ The asset registry, device profiles and configuration are still code and
 documentation today, so they are covered by the git repository rather than by
 this procedure.
 
+## There are two databases, not one
+
+The command journal is a separate file, deliberately — see
+[Command Journal Storage](COMMAND_JOURNAL_STORAGE.md). It needs backing up for a
+reason the measurements do not share: **its entire purpose is to still exist
+after something went wrong**, which makes "it was only on the SD card" an odd
+place to keep it.
+
+| File | Why it cannot be regenerated |
+| --- | --- |
+| `geopilot.sqlite3` | A winter of measurements happens once |
+| `commands.sqlite3` | An audit trail is asked about after an incident |
+
+## One command for both, verified
+
+```bash
+python3 tools/geopilot_backup.py --config config/installation.toml --into /media/backup
+```
+
+```text
+geopilot.sqlite3 -> geopilot-20260818T140000.sqlite3  128,432 rows, 34,112 kB, verified
+commands.sqlite3 -> commands-20260818T140000.sqlite3  17 rows, 20 kB, verified
+
+Every copy was reopened and its rows counted against the source.
+Now put one somewhere that is not this machine.
+```
+
+Three things it does that a `cp` does not:
+
+- **the online backup API**, so a live database copies consistently. The
+  demonstration above shows what `cp` produces instead;
+- **it verifies.** Every copy is reopened and its rows counted against the
+  source. A backup nobody has opened is a hope, and the moment you find out
+  otherwise is the moment you needed it;
+- **it produces one file each.** The copy is switched out of WAL journalling, so
+  there are no `-wal` and `-shm` companions to wonder about when you drag it to
+  a stick.
+
+| Exit code | Meaning |
+| --- | --- |
+| 0 | every copy verified |
+| 1 | bad arguments, or nothing present to back up |
+| 2 | **a copy failed or did not verify — do not trust it** |
+
+Exit 2 exists so a cron job can tell a broken database from a wrong invocation.
+A corrupt source reports 2, not 1.
+
+### In a cron job, before the first cold night
+
+```bash
+0 3 * * * /usr/bin/python3 /opt/geopilot/tools/geopilot_backup.py \
+    --config /etc/geopilot/installation.toml --into /media/backup
+```
+
+A Raspberry Pi writing every minute for a winter is a fair test of an SD card,
+and SD cards fail. The last line of the tool's output is the part people skip:
+**put one somewhere that is not this machine.**
+
 ## Method 1: The `sqlite3` Command, While Running
 
 This is the recommended path. The `sqlite3` client ships with macOS and most
