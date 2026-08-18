@@ -139,3 +139,10 @@ application, and the import boundary.
   interval.
 - Consider lowering resolution if 750 ms per probe becomes the constraint.
 - Record calibration offsets in the bench notes, alongside the date.
+
+## Measuring the offset
+
+`offset_celsius` is measured, not guessed: put every probe in one stirred
+bath and run `tools/geopilot_calibrate.py`. Two DS18B20 probes can sit a
+full degree apart and both be within specification, which would make half
+of a two-degree loop delta noise. See [Calibration](CALIBRATION.md).
