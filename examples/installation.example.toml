@@ -125,3 +125,27 @@ bit = "discrete_input"
 address = 0
 inverted = false
 source_reference = "TBD - trace the Y1 wire and record which input it lands on"
+
+# ---------------------------------------------------------------------------
+# Control targets, for relays GeoPilot is permitted to operate.
+#
+# Two separate switches have to be thrown before anything moves: a relay must
+# be listed here, AND [control] enabled must be true. Listing a target while
+# control is disabled is the intended first-run posture — the surface shows the
+# relay and reads its real state back from the bus, and every command is
+# refused and recorded as refused. See docs/CONTROL_SURFACE_ADR.md.
+
+[control]
+enabled = false
+
+[[control_target]]
+# minimum_interval_seconds is not a performance setting. Relay chatter is how
+# contactors weld and compressors die, so every target declares the fastest it
+# may be operated and the guard enforces it. Omit it and you get the
+# conservative default of 300 s, never an unlimited one.
+id = "target_zone_1_damper"
+source_id = "source_bench_bus"
+unit_id = 2
+address = 16
+minimum_interval_seconds = 300
+description = "Zone 1 damper. Fail-safe open when de-energised — verify by wiring, not by software."

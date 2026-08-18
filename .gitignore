@@ -51,3 +51,7 @@ Thumbs.db
 # telemetry, so they stay local.
 docs/hardware/SITE.md
 docs/hardware/BENCH_NOTES.md
+
+# The real installation: port paths, probe ids and what is wired where.
+# The example under examples/ is the one that ships.
+config/
