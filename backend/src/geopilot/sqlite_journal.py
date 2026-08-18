@@ -196,6 +196,24 @@ class SqliteCommandJournal:
         row = self._connection.execute("SELECT COUNT(*) FROM commands").fetchone()
         return int(cast(tuple[Any, ...], row)[0])
 
+    def backup(self, destination: str | Path) -> None:
+        """Write a consistent snapshot to ``destination``.
+
+        Safe while the journal is in use, for the same reason the historian's is:
+        SQLite's online backup API copies a consistent snapshot even with a
+        concurrent writer, which a plain file copy under WAL journalling does
+        not.
+
+        An audit trail that is never copied off the machine lasts exactly as
+        long as one SD card.
+        """
+
+        target = sqlite3.connect(str(destination))
+        try:
+            self._connection.backup(target)
+        finally:
+            target.close()
+
     def close(self) -> None:
         """Close the connection."""
 
