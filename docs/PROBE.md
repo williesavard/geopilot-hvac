@@ -76,16 +76,14 @@ probe and a recorded reading never disagree about the same sensor.
 The acquisition timer opens the same serial port every minute. So does the
 control surface, per command. Now so does this.
 
-**Nothing here retries.** A probe that reports a busy bus is a probe you press
-again, which is more honest than a loop that hides how often the port was taken.
-At a one-minute poll taking a fraction of a second, a collision is rare.
+They now queue rather than collide: see [Port Lock](PORT_LOCK.md). The lock is
+held across one request and its answer, so a probe waits a few milliseconds for
+the poller instead of failing — and, more importantly, cannot read the poller's
+answer by mistake.
 
-An advisory lock — `flock` on a file keyed to the port — would make the three
-serialise properly instead of one of them failing. It is not here because it
-would mean changing the acquisition path, which is the one thing that must not
-break and the one thing that cannot be tested without the real hardware. It is
-the right fix if collisions turn out to be more than a nuisance, and it should be
-made deliberately rather than smuggled in behind a button.
+**Nothing retries beyond that.** If the wait passes five seconds the probe
+reports a busy bus rather than looping, because at that point something is wrong
+that waiting longer will not fix.
 
 ## What it does not do
 
