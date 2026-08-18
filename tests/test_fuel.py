@@ -12,10 +12,13 @@ import pytest
 from geopilot.fuel import (
     HEATING_OIL_SAGUENAY,
     NATURAL_GAS_ENERGIR,
+    OIL_KWH_PER_LITRE,
+    PROPANE_KWH_PER_LITRE,
     TYPICAL_EFFICIENCY,
     FuelError,
     fuel_option,
     heat_pump_option,
+    propane_price,
     ranked,
     resistance_option,
 )
@@ -142,3 +145,55 @@ def test_the_efficiencies_flatter_combustion_rather_than_the_heat_pump() -> None
     assert TYPICAL_EFFICIENCY["electric resistance"] == 1.00
     assert TYPICAL_EFFICIENCY["gas furnace, condensing"] >= 0.95
     assert TYPICAL_EFFICIENCY["oil furnace"] >= 0.85
+
+
+def test_a_litre_of_propane_carries_two_thirds_of_a_litre_of_oil() -> None:
+    """The conversion that makes propane comparisons go wrong."""
+
+    assert PROPANE_KWH_PER_LITRE == 7.03
+    assert pytest.approx(0.663, abs=0.005) == PROPANE_KWH_PER_LITRE / OIL_KWH_PER_LITRE
+
+
+def test_propane_cheaper_per_litre_can_still_be_dearer_per_kwh() -> None:
+    """A fifth off the litre price is not a fifth off the heat."""
+
+    cheaper_per_litre = propane_price(
+        1.80, as_of=date(2026, 8, 18), supplier="test"
+    )  # well under oil's 2.058 $/L
+
+    propane = fuel_option(cheaper_per_litre, "propane furnace, condensing")
+    oil = fuel_option(HEATING_OIL_SAGUENAY, "oil furnace")
+
+    assert cheaper_per_litre.price_per_unit < HEATING_OIL_SAGUENAY.price_per_unit
+    assert propane.cost_per_useful_kwh > oil.cost_per_useful_kwh
+
+
+def test_propane_requires_a_price_from_an_invoice() -> None:
+    """There is no published residential propane survey to default to."""
+
+    with pytest.raises(FuelError, match="must be positive"):
+        propane_price(0.0, as_of=date(2026, 8, 18), supplier="test")
+
+
+def test_a_propane_price_carries_its_supplier_and_date() -> None:
+    """Because the contract is what sets it, not a regional market."""
+
+    price = propane_price(2.30, as_of=date(2026, 8, 18), supplier="Nutrinor")
+
+    assert "Nutrinor" in price.name
+    assert "Nutrinor" in price.source
+    assert "2026-08-18" in price.source
+    assert price.as_of == date(2026, 8, 18)
+
+
+def test_propane_is_the_most_expensive_option_at_regional_prices() -> None:
+    """Around 32 c per useful kWh at 2.15 $/L, condensing."""
+
+    price = propane_price(2.15, as_of=date(2026, 8, 18), supplier="test")
+    propane = fuel_option(price, "propane furnace, condensing")
+
+    assert propane.cost_per_useful_kwh == pytest.approx(0.3219, abs=0.001)
+    assert propane.cost_per_useful_kwh > fuel_option(
+        HEATING_OIL_SAGUENAY, "oil furnace"
+    ).cost_per_useful_kwh
+    assert propane.cost_per_useful_kwh > 8 * heat_pump_option(3.0).cost_per_useful_kwh

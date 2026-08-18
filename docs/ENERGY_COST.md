@@ -137,12 +137,44 @@ are where comparisons usually go wrong: energy content, then efficiency.
 | --- | ---: | ---: |
 | Heat pump, COP 3 | **3.71** | 1 718 $ |
 | Heat pump, COP 2 | 5.57 | 2 576 $ |
-| Natural gas, condensing | 6.06 | 2 802 $ |
-| Natural gas, non-condensing | 7.20 | 3 328 $ |
+| Natural gas, condensing¹ | 6.06 | 2 802 $ |
+| Natural gas, non-condensing¹ | 7.20 | 3 328 $ |
 | Electric resistance | 11.14 | 5 153 $ |
-| **Heating oil** | **22.82** | **10 553 $** |
+| Heating oil | 22.82 | 10 553 $ |
+| **Propane, condensing, at 2,15 $/L** | **32.19** | **14 888 $** |
+| **Propane, condensing, at 2,55 $/L** | **38.18** | **17 658 $** |
 
-Oil is **6.1 times** a COP 3 heat pump and **twice** electric resistance.
+¹ Natural gas is listed for completeness and is not available at this address.
+
+Propane is the **most expensive** option on the list: nine times a COP 3 heat
+pump, three times electric resistance, and half again more than oil.
+
+### Propane has no published price, and that is a design constraint
+
+Every other price here has a source that can be cited and re-checked. **Propane
+does not.** The Régie de l'énergie surveys light heating oil weekly by
+administrative region; Statistics Canada publishes gasoline and fuel oil.
+Neither publishes a residential propane price for Québec.
+
+What propane costs depends on the contract — annual volume, tank rental, fixed
+or floating price, seasonal pre-buy, and for a cooperative, member pricing and
+any patronage rebate. Two houses on the same street can pay prices a third
+apart and neither is wrong.
+
+So `propane_price` **has no default and requires one**, and it carries the
+supplier and the invoice date with it. A baked-in figure would look like a
+citation and be a guess. The 2,15–2,55 $/L used above is a regional estimate
+from a secondary source with an interest in the answer; **replace it with a
+Nutrinor invoice** before it decides anything.
+
+### The litre trap
+
+A litre of propane carries **25,3 MJ** against light oil's **38,2 MJ** — barely
+two thirds. Propane priced a fifth below oil per litre is still materially more
+expensive per unit of heat, and comparing the two by the litre is comparing
+different quantities. This is the single most common error in fuel comparisons
+and the module refuses to make it: every price is converted through its own
+energy content before anything is ranked.
 
 ### Where those come from
 
@@ -171,21 +203,20 @@ which **flatters combustion** against the heat pump in every row above.
 
 ### Two things this settles
 
-**Converting to oil to qualify for Rate DT does not work at these prices.** Rate
-DT's cheap tier only pays if the cold hours are carried by a fossil backup, and
-oil at 22,82 ¢ per useful kWh is more than twice what Rate D charges for
-resistance heat. The dual-energy rate is a saving on paper that the fuel
-undoes.
+**No fossil backup makes Rate DT worth having here.** The dual-energy rate's
+cheap tier only pays if the cold hours are carried by a fossil fuel, and both
+fuels actually available cost more per unit of heat than Rate D charges for
+resistance electricity — oil twice over, propane three times. The rate is a
+saving on paper that the fuel undoes, and with propane it undoes it twice.
 
-**Natural gas is close to a mediocre heat pump and beaten by a good one.** A
-COP 2 machine is already cheaper than condensing gas here. That is before
-asking the prior question:
+**Propane is a poor backup on cost alone**, before any question of the equipment
+to burn it in. If a replacement design proposes a propane stage, the case for it
+has to be made on capacity or resilience, not on running cost.
 
-**Is there a gas main on the street?** Énergir's *transmission* network crosses
-Lac-Saint-Jean municipalities, which is not the same thing as a *distribution*
-service at an address — a high-pressure pipeline passing through the
-municipality connects nothing. Énergir answers this by address, and it should be
-asked before any of the gas arithmetic above is given weight.
+**Natural gas is not available at this address** — the network here is propane.
+It stays in the table only as a reference point, and as a reminder that a
+*transmission* pipeline crossing a municipality is not a *distribution* service
+at a street address.
 
 ## Using it
 

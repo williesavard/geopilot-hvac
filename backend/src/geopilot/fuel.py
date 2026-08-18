@@ -34,6 +34,18 @@ Natural Resources Canada's conversion factor for furnace oil. 38.2 MJ ÷ 3.6
 MJ/kWh = 10.61 kWh/L.
 """
 
+PROPANE_KWH_PER_LITRE = 7.03
+"""Propane: 25,3 MJ/L higher heating value, ÷ 3,6 = 7,03 kWh/L.
+
+Natural Resources Canada's conversion factor.
+
+**This is the number that makes propane comparisons go wrong.** A litre of
+propane carries barely two thirds of a litre of oil (10,61 kWh), so a propane
+price that looks a fifth cheaper per litre is materially *more* expensive per
+unit of heat. Litres of different fuels are not comparable quantities and
+nothing but the energy content makes them so.
+"""
+
 GAS_KWH_PER_CUBIC_METRE = 10.42
 """Natural gas: 37.5 MJ/m³ higher heating value, ÷ 3.6 = 10.42 kWh/m³.
 
@@ -50,6 +62,8 @@ TYPICAL_EFFICIENCY = {
     "oil furnace": 0.85,
     "gas furnace, condensing": 0.95,
     "gas furnace, non-condensing": 0.80,
+    "propane furnace, condensing": 0.95,
+    "propane furnace, non-condensing": 0.80,
     "electric resistance": 1.00,
 }
 """What fraction of the fuel's energy reaches the house.
@@ -140,6 +154,43 @@ It also excludes the fixed charge of 67,948 ¢ per meter per day, which is a
 subscription rather than a price of heat — the same reasoning that keeps the
 electricity access charge out of `marginal_cost`.
 """
+
+
+def propane_price(
+    price_per_litre: float,
+    *,
+    as_of: date,
+    supplier: str,
+) -> FuelPrice:
+    """Build a propane price from an invoice. There is no default, deliberately.
+
+    Every other price in this module has a published source that can be cited
+    and re-checked. **Propane does not.** The Régie de l'énergie surveys light
+    heating oil weekly by administrative region; Statistics Canada publishes
+    gasoline and fuel oil. Neither publishes a residential propane price for
+    Québec.
+
+    What propane costs depends on the contract: annual volume, tank rental,
+    whether the price is fixed or floating, seasonal pre-buy, and — for a
+    cooperative — member pricing and any patronage rebate. Two houses on the
+    same street can pay prices that differ by a third, and neither is wrong.
+
+    So the price must come from an invoice, and the invoice's date and supplier
+    travel with it. A baked-in default would look like a citation and be a
+    guess.
+    """
+
+    if price_per_litre <= 0:
+        raise FuelError("a propane price per litre must be positive")
+
+    return FuelPrice(
+        name=f"Propane, {supplier}",
+        price_per_unit=price_per_litre,
+        unit="L",
+        kwh_per_unit=PROPANE_KWH_PER_LITRE,
+        as_of=as_of,
+        source=f"invoice from {supplier}, {as_of.isoformat()}, before rebate",
+    )
 
 
 @dataclass(frozen=True, slots=True)
