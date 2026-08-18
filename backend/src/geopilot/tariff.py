@@ -34,7 +34,7 @@ from datetime import date
 
 SOURCE = (
     "Hydro-Québec, Tarifs d'électricité, en vigueur le 1er avril 2026, "
-    "ISBN 978-2-555-03533-1 (PDF), articles 2.5 and 2.34"
+    "ISBN 978-2-555-03533-1 (PDF), articles 2.5, 3.2 and 2.34"
 )
 """Where every number below was read from.
 
@@ -144,6 +144,70 @@ RATE_D = TieredRate(
 """The standard residential rate, article 2.5.
 
 46,154 ¢ per day, 7,065 ¢/kWh up to 40 kWh × days, 11,142 ¢/kWh beyond.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class GeneralRate:
+    """Rate G, the general rate. Structurally the opposite of Rate D.
+
+    Worth having because a multi-unit building's mechanical room is often
+    metered separately, and a separate meter serving common equipment is not
+    automatically on the domestic rate.
+
+    Two differences that matter:
+
+    - **the tiers are inverted.** The first 15 090 kWh of a month are the
+      *expensive* ones and everything after is cheaper, where Rate D is the
+      other way round. A large heating load therefore lands in the cheap tier,
+      and its marginal price, 9,534 ¢, is **below** Rate D's 11,142 ¢;
+    - **there is a demand charge** past 50 kW, billed on the highest power drawn
+      in the period. Under it, a machine that draws hard for fifteen minutes
+      costs the same as one that draws hard all month.
+    """
+
+    name: str
+    access_per_month: float
+    first_tier_price: float
+    first_tier_kwh_per_month: float
+    second_tier_price: float
+    demand_price_per_kw: float
+    demand_threshold_kw: float
+    effective_from: date
+    source: str
+
+    def marginal_price(self, monthly_kwh: float) -> float:
+        """The price of one more kWh at a given monthly consumption.
+
+        Energy only. The demand charge depends on *when* power is drawn rather
+        than how much energy is used, so it cannot be expressed per kWh and is
+        deliberately not folded in.
+        """
+
+        if monthly_kwh < 0:
+            raise TariffError("consumption cannot be negative")
+        return (
+            self.second_tier_price
+            if monthly_kwh >= self.first_tier_kwh_per_month
+            else self.first_tier_price
+        )
+
+
+RATE_G = GeneralRate(
+    name="Tarif G",
+    access_per_month=15.426,
+    first_tier_price=0.12388,
+    first_tier_kwh_per_month=15_090.0,
+    second_tier_price=0.09534,
+    demand_price_per_kw=22.071,
+    demand_threshold_kw=50.0,
+    effective_from=EFFECTIVE_FROM,
+    source=SOURCE,
+)
+"""The general rate, article 3.2, monthly structure for an annual subscription.
+
+15,426 $/month, 22,071 $/kW past 50 kW, 12,388 ¢/kWh to 15 090 kWh, 9,534 ¢
+beyond.
 """
 
 
