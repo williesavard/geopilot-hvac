@@ -77,10 +77,23 @@ it was written on.
 
 ## What is stored
 
-Every attempt, whatever became of it: applied, refused, failed. A command
-refused because control was disabled, or because a relay had not rested long
-enough, is evidence about what the system was asked to do — often more
+Every attempt, whatever became of it: issued, applied, refused, failed. A
+command refused because control was disabled, or because a relay had not rested
+long enough, is evidence about what the system was asked to do — often more
 interesting than what it did.
+
+**A command that reaches the bus leaves two records, in order.** The intent —
+status `issued`, id suffixed `/issued` — is written *before* the transport is
+touched, then the outcome under the plain id. This closes the one window the
+single-record design had: a crash between the coil write and the outcome record
+was an operated relay with no trace. Now an `issued` with no matching outcome
+is itself the trace, and it says exactly when. The suffix exists because of the
+retry rule below: without it, the outcome would be swallowed as a re-append of
+the intent.
+
+The counterpart is deliberate: a journal that cannot take the intent stops the
+command, before any hardware moves. An audit trail that only works when it is
+convenient is not one.
 
 Re-appending the same `command_id` is ignored rather than raising. A retried
 write of a record already on disk is not a new event, and a journal that throws

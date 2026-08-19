@@ -86,15 +86,29 @@ Worth recording so the next review does not re-litigate them:
   `IPAddressDeny`; the private files (`SITE.md`, `BENCH_NOTES.md`,
   `config/`) are ignored and verified untracked.
 
-## Accepted, not fixed
+## Fixed on second thought
 
-- **any local process can take the token** by fetching the page. The ADR
-  accepts this: loopback plus the four header checks defend against the
-  browser being turned, not against code already on the Pi;
-- **a crash between `write_coil` and `_record`** loses one audit record. The
-  window is milliseconds and the fix (journalling intent before outcome)
-  buys a two-phase journal for a solo installation; noted for the automatic
-  control ADR, where the calculus changes;
-- **`[::1]:8322` as a Host value is refused** — the port-stripping is
-  IPv4-shaped. Fail-closed, cosmetic, and loopback IPv4 is what the tool
-  binds and announces.
+Two of the three items this review first accepted were fixed after all:
+
+- **the crash window between `write_coil` and `_record`.** Intent is now
+  journalled *before* the bus is touched: an applied command leaves an
+  `issued` record then an `applied` one, and an `issued` with no matching
+  outcome is itself the evidence of the crash. The intent record's id
+  carries an `/issued` suffix, because the journal treats a re-appended
+  `command_id` as a retry and would have swallowed the outcome. This is
+  audit-first with teeth: a journal that cannot take the intent stops the
+  command before any hardware moves;
+- **`[::1]:8322` as a Host value** — the port-stripping was IPv4-shaped. A
+  bracketed IPv6 literal with a port now reads as this machine. Fail-closed
+  but wrong is still wrong, and wrong in the direction that teaches people
+  to loosen checks.
+
+## Accepted, deliberately
+
+- **any local process can take the token** by fetching the page. This is the
+  ADR's threat model, not an oversight: loopback plus the four header checks
+  defend against the browser being turned, not against code already running
+  on the Pi. "Fixing" it means accounts and authentication, which the ADR
+  considered and rejected — a password typed into a browser on the same
+  machine protects nothing loopback does not already protect. If remote
+  access is ever wanted, that is a new ADR, not a patch.

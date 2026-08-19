@@ -285,7 +285,16 @@ def _matches(presented: str, expected: str) -> bool:
 def _is_loopback(host: str | None) -> bool:
     if not host:
         return False
-    name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+    name = host.strip()
+    if name.startswith("["):
+        # A bracketed IPv6 literal, with or without a port: the name is the
+        # brackets and what they hold, and everything after them is the port.
+        closing = name.find("]")
+        if closing == -1:
+            return False
+        name = name[: closing + 1]
+    elif name.count(":") == 1:
+        name = name.rsplit(":", 1)[0]
     return name.strip().lower() in LOOPBACK_HOSTS
 
 
