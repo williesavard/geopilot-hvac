@@ -149,5 +149,6 @@ Accept when a reviewer confirms:
    [Command Journal Storage](COMMAND_JOURNAL_STORAGE.md). It also fixed a rate
    limit that a restart could erase.
 2. A systemd unit for the surface, with `--bind` fixed to loopback.
-3. An ADR for automatic control, which is where the interesting safety questions
-   actually live.
+3. ~~An ADR for automatic control~~ — done; see
+   [Automatic Control](AUTOMATIC_CONTROL_ADR.md). It decides the architecture and
+   the gates, and deliberately ships no code.

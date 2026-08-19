@@ -178,3 +178,5 @@ Accept when a reviewer confirms:
    transport exists; see `docs/MODBUS_BIT_BOUNDARY.md`. Ingestion is blocked on a
    domain decision, because GeoPilot has no representation for a discrete state.
 4. Revisit anticipatory control only after a heating season of data exists.
+   The shape it would take, and the gates it must pass, are now decided in
+   [Automatic Control](AUTOMATIC_CONTROL_ADR.md). This condition is gate 1 of six.
