@@ -13,7 +13,9 @@ from pathlib import Path
 
 import pytest
 from geopilot.domain import DataQuality, Measurement
+from geopilot.provenance import ProvenanceKind, SensorProvenance
 from geopilot.sqlite_historian import SqliteMeasurementHistorian
+from geopilot.sqlite_provenance import SqliteProvenanceJournal, provenance_path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
@@ -1212,3 +1214,158 @@ def test_cost_is_silent_unless_asked_for(
     main(["--database", str(database), "--sensor", "sensor_energy"])
 
     assert "$" not in capsys.readouterr().out
+
+
+# --- Provenance ---------------------------------------------------------------
+#
+# The warning is the whole point of the provenance journal reaching the report:
+# a step in the numbers that came from an edited configuration rather than from
+# the equipment. It has to appear without being asked for, and — just as
+# important — it has to stay quiet when it is not about what the reader is
+# looking at, because an irrelevant warning is how a warning stops being read.
+
+
+def probe(sensor_id: str, *, device: str, offset: float) -> SensorProvenance:
+    return SensorProvenance(
+        sensor_id=sensor_id,
+        kind=ProvenanceKind.ONEWIRE,
+        reference=device,
+        unit="degC",
+        offset=offset,
+    )
+
+
+def with_recalibration(database: Path, *, moved: str = "sensor_loop_in") -> None:
+    """Record two epochs, the second recalibrating one probe mid-recording."""
+
+    journal = SqliteProvenanceJournal(provenance_path(database))
+    journal.record(
+        (
+            probe("sensor_loop_in", device="28-aaaa", offset=0.31),
+            probe("sensor_loop_out", device="28-bbbb", offset=-0.12),
+        ),
+        at=START - timedelta(days=1),
+    )
+    journal.record(
+        (
+            probe(
+                "sensor_loop_in",
+                device="28-aaaa",
+                offset=0.44 if moved == "sensor_loop_in" else 0.31,
+            ),
+            probe(
+                "sensor_loop_out",
+                device="28-bbbb",
+                offset=-0.5 if moved == "sensor_loop_out" else -0.12,
+            ),
+        ),
+        at=START + timedelta(minutes=2),
+    )
+    journal.close()
+
+
+def test_a_correction_that_moved_mid_window_warns_without_being_asked(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = database_with(tmp_path, values=(20.0, 21.0, 22.0, 23.0))
+    with_recalibration(database)
+
+    assert main(["--database", str(database), "--sensor", "sensor_loop_in"]) == EXIT_OK
+
+    captured = capsys.readouterr()
+    assert "a correction changed inside this window" in captured.err
+    assert "sensor_loop_in: offset 0.31 → 0.44" in captured.err
+    # The report itself still lands on stdout, unpolluted.
+    assert "sensor : sensor_loop_in" in captured.out
+    assert "WARNING" not in captured.out
+
+
+def test_a_change_to_another_sensor_stays_quiet(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An irrelevant warning is how a warning stops being read."""
+
+    database = database_with(tmp_path, values=(20.0, 21.0, 22.0, 23.0))
+    with_recalibration(database, moved="sensor_loop_out")
+
+    assert main(["--database", str(database), "--sensor", "sensor_loop_in"]) == EXIT_OK
+
+    assert "WARNING" not in capsys.readouterr().err
+
+
+def test_a_window_that_closes_before_the_change_stays_quiet(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = database_with(tmp_path, values=(20.0, 21.0, 22.0, 23.0))
+    with_recalibration(database)
+
+    assert (
+        main(
+            [
+                "--database",
+                str(database),
+                "--sensor",
+                "sensor_loop_in",
+                "--until",
+                (START + timedelta(minutes=1)).isoformat(),
+            ]
+        )
+        == EXIT_OK
+    )
+
+    assert "WARNING" not in capsys.readouterr().err
+
+
+def test_csv_output_stays_a_clean_csv(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--csv > file.csv` must not acquire a prose header."""
+
+    database = database_with(tmp_path, values=(20.0, 21.0, 22.0, 23.0))
+    with_recalibration(database)
+
+    main(
+        ["--database", str(database), "--sensor", "sensor_loop_in", "--bucket", "1h", "--csv"]
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out.startswith("starts_at,")
+    assert "WARNING" in captured.err
+
+
+def test_a_recording_with_no_journal_says_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Silence, not a complaint: a recording that predates the journal is
+    normal, and nagging about it every run teaches people to pipe stderr away."""
+
+    database = database_with(tmp_path, values=(20.0, 21.0))
+
+    assert main(["--database", str(database), "--sensor", "sensor_loop_in"]) == EXIT_OK
+
+    assert capsys.readouterr().err == ""
+
+
+def test_the_calibration_history_can_be_printed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = database_with(tmp_path, values=(20.0, 21.0))
+    with_recalibration(database)
+
+    assert main(["--database", str(database), "--provenance"]) == EXIT_OK
+
+    output = capsys.readouterr().out
+    assert "from 28-aaaa, +0.31" in output
+    assert "from 28-aaaa, +0.44" in output
+    assert "sensor_loop_in: offset 0.31 → 0.44" in output
+    assert "2 epoch(s)" in output
+
+
+def test_asking_for_a_history_that_does_not_exist_is_not_data(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = database_with(tmp_path, values=(20.0,))
+
+    assert main(["--database", str(database), "--provenance"]) == EXIT_NO_DATA
+
+    assert "no provenance journal" in capsys.readouterr().out
