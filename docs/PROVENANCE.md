@@ -169,5 +169,6 @@ epoch c3b1e1270b43  from 2027-01-14T00:00:00+00:00
 - **it cannot see outside the configuration.** A probe that drifted has the same
   provenance yesterday and today; catching that is what a re-calibration run is
   for, and running one *creates* an epoch, which is the point;
-- ~~nothing consumes it yet~~ — resolved for the report; see below. The
-  dashboard and a packaged export for the engineer still do not.
+- ~~nothing consumes it yet~~ — resolved. The report warns when a correction
+  moved (see above) and [the dossier](DOSSIER.md) names and dates each change on
+  its front page. The dashboard still does not.
