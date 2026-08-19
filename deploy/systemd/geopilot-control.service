@@ -1,0 +1,116 @@
+# The control surface: the only GeoPilot process that listens.
+#
+# Everything else here runs, does one thing and exits. This one holds a socket
+# and can close a contactor, so it is the unit worth reading before installing.
+#
+#   sudo cp deploy/systemd/geopilot-control.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now geopilot-control.service
+#   xdg-open http://127.0.0.1:8322/
+#
+# Installing this does not enable control. `[control] enabled = true` in the
+# configuration does, and the default is false. See docs/CONTROL_SURFACE_ADR.md.
+
+[Unit]
+Description=GeoPilot control surface
+Documentation=file:///opt/geopilot/docs/CONTROL_SURFACE_ADR.md
+After=multi-user.target
+
+[Service]
+Type=simple
+
+# The same user as geopilot-poll.service, and that is load bearing rather than
+# tidiness. The two coordinate through an advisory lock on a file in /run/lock,
+# and they also share a WAL database that a reader must be able to open. A lock
+# one of them cannot open coordinates nothing. See docs/PORT_LOCK.md.
+User=geopilot
+Group=geopilot
+SupplementaryGroups=dialout
+
+WorkingDirectory=/opt/geopilot
+
+# --bind is fixed to loopback here, and nothing passes it through. The tool
+# accepts --bind and warns when it is used; a unit file is a thing people copy
+# and forget, so this one has no way to say anything else.
+ExecStart=/opt/geopilot/venv/bin/python /opt/geopilot/tools/geopilot_control.py \
+    --config /etc/geopilot/installation.toml \
+    --bind 127.0.0.1 --port 8322
+
+# /var/lib/geopilot: the measurements database, and commands.sqlite3 beside it.
+StateDirectory=geopilot
+StateDirectoryMode=0750
+
+Restart=on-failure
+RestartSec=10s
+
+# Restarting used to be unsafe. The minimum interval between relay operations
+# lived in memory, so every restart forgot that a relay had just moved. The
+# journal is on disk now and the guard consults it, so a restart resumes the
+# interval instead of resetting it. See docs/COMMAND_JOURNAL_STORAGE.md.
+#
+# The ceiling still earns its place: a unit that restarts five times in five
+# minutes has a problem restarting will not fix.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# ---------------------------------------------------------------------------
+# Confinement
+#
+# This process can operate HVAC relays. Each directive below removes something
+# it has no business doing.
+# ---------------------------------------------------------------------------
+
+# Defence in depth against the one mistake that would matter. --bind already
+# says loopback; this makes the kernel agree, so a later edit to ExecStart
+# cannot quietly expose relay control to the network.
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+# It serves a local page and talks to a serial port. No other socket family.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# PrivateDevices= is deliberately NOT set: it replaces /dev with a skeleton and
+# the RS485 adapter would vanish. The device class is allowed explicitly
+# instead, so the process reaches USB serial adapters and nothing else.
+DevicePolicy=closed
+DeviceAllow=char-ttyUSB rw
+DeviceAllow=char-ttyACM rw
+
+# The port lock, taken by this unit and by geopilot-poll.service. ProtectSystem
+# =strict makes the whole hierarchy read-only, /run included, and port_lock
+# fails open when it cannot create its file — quietly, by design. Without this
+# line the lock would never exist and the two would interleave on the bus.
+#
+# The fallback directory would not save it either: PrivateTmp=true gives each
+# unit its own /tmp, so two processes falling back would take unrelated locks
+# and both believe themselves coordinated.
+ReadWritePaths=/run/lock
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+
+# A blocked call returns EPERM rather than killing the process with SIGSYS.
+# The difference matters: a Python OSError is visible in the journal and can be
+# handled, where a SIGSYS is a service that vanished for no stated reason.
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# MemoryDenyWriteExecute= is deliberately NOT set. It breaks interpreters that
+# build executable trampolines (ctypes and cffi callbacks), the failure is a
+# crash with no useful message, and none of this has been run on the Pi yet.
+
+[Install]
+WantedBy=multi-user.target

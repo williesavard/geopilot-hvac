@@ -27,6 +27,13 @@ RestartSec=10s
 KillSignal=SIGTERM
 TimeoutStopSec=120
 
+# The serial port lock, shared with the other GeoPilot units. ProtectSystem=
+# strict makes /run read-only, and port_lock fails open when it cannot create
+# its file — quietly, by design — so without this line two processes would
+# interleave requests and responses on the same RS485 segment. See
+# docs/PORT_LOCK.md.
+ReadWritePaths=/run/lock
+
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

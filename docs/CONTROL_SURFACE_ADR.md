@@ -148,7 +148,11 @@ Accept when a reviewer confirms:
 1. ~~A persistent command journal~~ — done; see
    [Command Journal Storage](COMMAND_JOURNAL_STORAGE.md). It also fixed a rate
    limit that a restart could erase.
-2. A systemd unit for the surface, with `--bind` fixed to loopback.
+2. ~~A systemd unit for the surface, with `--bind` fixed to loopback~~ —
+   done; `deploy/systemd/geopilot-control.service`, described in
+   [Deployment](DEPLOYMENT.md). Writing it found a defect in the two units
+   that already existed: `ProtectSystem=strict` made the port lock
+   impossible to create, so locking had never engaged.
 3. ~~An ADR for automatic control~~ — done; see
    [Automatic Control](AUTOMATIC_CONTROL_ADR.md). It decides the architecture and
    the gates, and deliberately ships no code.
