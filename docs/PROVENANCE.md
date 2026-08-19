@@ -116,6 +116,52 @@ Append only, WAL, `synchronous=FULL`, ordered by write sequence — the same
 decisions as [Command Journal Storage](COMMAND_JOURNAL_STORAGE.md), for the same
 reasons.
 
+## In the report
+
+`geopilot_report.py` warns, **without being asked**, when a correction moved
+inside the window it is reporting on:
+
+```text
+WARNING: a correction changed inside this window. Measurements before and after
+each moment below were computed differently, so a step in these numbers may be
+the configuration rather than the equipment.
+  2027-01-14T00:00:00+00:00 (epoch c3b1e1270b43)
+    sensor_loop_in: offset 0.31 → 0.44
+  see docs/PROVENANCE.md
+```
+
+Two design decisions make it worth having rather than worth muting:
+
+- **it only fires for sensors the report actually depends on.** A change to the
+  tank probe does not warn a reader looking at the loop delta. An irrelevant
+  warning is how a warning stops being read;
+- **it goes to stderr**, so `--csv > loop.csv` stays a clean CSV while the
+  caveat still reaches the terminal.
+
+Silence means nothing moved, or there is no journal because the recording
+predates it. Neither is worth a line, and nagging about the second every run
+teaches people to pipe stderr away.
+
+The full history is available on request:
+
+```bash
+python3 tools/geopilot_report.py --database /var/lib/geopilot/geopilot.sqlite3 --provenance
+```
+
+```text
+epoch f3b69c006043  from 2026-10-01T00:00:00+00:00
+  sensor_loop_in                   from 28-000005e2fdc3, +0.31
+  sensor_loop_out                  from 28-000005f1ab9d, -0.12
+
+epoch c3b1e1270b43  from 2027-01-14T00:00:00+00:00
+  sensor_loop_in                   from 28-000005e2fdc3, +0.44
+  sensor_loop_out                  from 28-000005f1ab9d, -0.12
+  changed:
+    sensor_loop_in: offset 0.31 → 0.44
+
+2 epoch(s); the last one is still in effect
+```
+
 ## Limits
 
 - **it starts when it starts.** Recording that predates the journal has no
@@ -123,5 +169,5 @@ reasons.
 - **it cannot see outside the configuration.** A probe that drifted has the same
   provenance yesterday and today; catching that is what a re-calibration run is
   for, and running one *creates* an epoch, which is the point;
-- **nothing consumes it yet in the dashboard.** The report and export work that
-  annotates a window with its epochs is the obvious next step.
+- ~~nothing consumes it yet~~ — resolved for the report; see below. The
+  dashboard and a packaged export for the engineer still do not.

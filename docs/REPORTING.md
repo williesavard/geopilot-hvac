@@ -537,3 +537,14 @@ with no reading in range being left out rather than zeroed, the idle sense
 supplying events, an event moment carrying the local wall clock, pooling
 weighted by readings rather than by event, and the three refusals — an unknown
 edge, a zero-length window and a backwards one.
+
+## Corrections that moved
+
+Every reported number has already had a correction applied — a probe offset, a
+register scale, a polarity flip. When one of those changed inside the window
+being reported on, the report says so on stderr before printing anything, and
+only for the sensors the report actually depends on.
+
+That warning is the difference between "the loop delta stepped in January" and
+"the loop delta stepped in January **and so did the calibration**". See
+[Provenance](PROVENANCE.md); `--provenance` prints the full history.

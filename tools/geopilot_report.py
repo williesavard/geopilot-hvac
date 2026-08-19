@@ -45,7 +45,9 @@ import sqlite3
 import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
+from geopilot.provenance import compare
 from geopilot.reporting import (
     DEFAULT_APPROACH,
     DEFAULT_PAIRING_TOLERANCE,
@@ -67,6 +69,11 @@ from geopilot.reporting import (
     runs,
     summarize,
     summarize_runs,
+)
+from geopilot.sqlite_provenance import (
+    ProvenanceStorageError,
+    SqliteProvenanceJournal,
+    provenance_path,
 )
 from geopilot.tariff import RATE_D
 
@@ -175,6 +182,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--csv",
         action="store_true",
         help="write buckets as CSV, for plotting; ignored without --bucket",
+    )
+    parser.add_argument(
+        "--provenance",
+        action="store_true",
+        help=(
+            "print the calibration history instead of a report: which corrections "
+            "were in effect, and when they changed"
+        ),
     )
     return parser
 
@@ -325,6 +340,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("error: --while needs --sensor; coverage is never gated", file=sys.stderr)
         return EXIT_USAGE
 
+    if arguments.provenance:
+        return _report_provenance(arguments.database)
+
     try:
         connection = open_readonly(arguments.database)
     except ReportingError as error:
@@ -332,6 +350,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_USAGE
 
     try:
+        # Before the report, not after: it changes how the numbers should be
+        # read, and a caveat that arrives after the conclusion is a footnote.
+        _warn_if_corrections_moved(connection, arguments.database, arguments, start, end)
+
         if arguments.events:
             return _report_approaches(
                 connection,
@@ -404,6 +426,142 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_USAGE
     finally:
         connection.close()
+
+
+def _sensors_in_play(arguments: argparse.Namespace) -> tuple[str, ...]:
+    """Which sensors this report actually depends on.
+
+    A warning about a sensor the reader is not looking at is noise, and noise is
+    how a warning stops being read. An empty tuple means the report covers
+    everything, so everything is relevant.
+    """
+
+    named = (
+        arguments.sensor,
+        arguments.minus,
+        arguments.while_asserted,
+        arguments.while_not_asserted,
+        arguments.events,
+    )
+    return tuple(sorted({name for name in named if name}))
+
+
+def _window(
+    connection: sqlite3.Connection,
+    start: datetime | None,
+    end: datetime | None,
+) -> tuple[datetime, datetime] | None:
+    """The window a report covers, filling in open ends from the recording."""
+
+    if start is not None and end is not None:
+        return start, end
+
+    reports = coverage(connection)
+    if not reports:
+        return None
+    return (
+        start or min(report.first_observed_at for report in reports),
+        end or max(report.last_observed_at for report in reports),
+    )
+
+
+def _warn_if_corrections_moved(
+    connection: sqlite3.Connection,
+    database: str,
+    arguments: argparse.Namespace,
+    start: datetime | None,
+    end: datetime | None,
+) -> None:
+    """Say so, on stderr, when a reported sensor's correction changed mid-window.
+
+    This is the failure the provenance journal exists for: a step in the numbers
+    that came from an edited configuration rather than from the equipment. It
+    prints without being asked, because a warning you have to request is a
+    warning nobody sees, and it goes to stderr so `--csv > file.csv` stays a
+    clean CSV.
+
+    Silence means one of two things, and both are fine: nothing moved, or there
+    is no journal because the recording predates it. Neither is worth a line.
+    """
+
+    location = provenance_path(database)
+    if not Path(location).exists():
+        return
+
+    span = _window(connection, start, end)
+    if span is None:
+        return
+
+    watched = _sensors_in_play(arguments)
+    journal = SqliteProvenanceJournal(location)
+    try:
+        moves = journal.changes_between(*span)
+    except ProvenanceStorageError:
+        return
+    finally:
+        journal.close()
+
+    relevant = [
+        (epoch, [change for change in changes if not watched or change.sensor_id in watched])
+        for epoch, changes in moves
+    ]
+    relevant = [(epoch, changes) for epoch, changes in relevant if changes]
+    if not relevant:
+        return
+
+    print(
+        "WARNING: a correction changed inside this window. Measurements before "
+        "and after each moment below were computed differently, so a step in "
+        "these numbers may be the configuration rather than the equipment.",
+        file=sys.stderr,
+    )
+    for epoch, changes in relevant:
+        print(
+            f"  {epoch.recorded_at.isoformat(timespec='seconds')} "
+            f"(epoch {epoch.short_fingerprint})",
+            file=sys.stderr,
+        )
+        for change in changes:
+            print(f"    {change.describe()}", file=sys.stderr)
+    print("  see docs/PROVENANCE.md\n", file=sys.stderr)
+
+
+def _report_provenance(database: str) -> int:
+    """Print the calibration history: what was in effect, and from when."""
+
+    location = provenance_path(database)
+    if not Path(location).exists():
+        print(f"no provenance journal beside {database}")
+        print("this recording predates the journal, or has never been polled")
+        return EXIT_NO_DATA
+
+    journal = SqliteProvenanceJournal(location)
+    try:
+        epochs = journal.epochs()
+    finally:
+        journal.close()
+
+    if not epochs:
+        print("provenance journal is empty")
+        return EXIT_NO_DATA
+
+    for index, epoch in enumerate(epochs):
+        print(
+            f"epoch {epoch.short_fingerprint}  from "
+            f"{epoch.recorded_at.isoformat(timespec='seconds')}"
+        )
+        for entry in epoch.sensors:
+            print(f"  {entry.sensor_id:32s} {entry.describe()}")
+
+        if index:
+            changes = compare(epochs[index - 1].sensors, epoch.sensors)
+            print("  changed:")
+            for change in changes:
+                print(f"    {change.describe()}")
+        print()
+
+    print(f"{len(epochs)} epoch(s); the last one is still in effect")
+    return EXIT_OK
 
 
 def _report_coverage(connection: sqlite3.Connection) -> int:
