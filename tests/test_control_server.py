@@ -420,8 +420,13 @@ def test_a_command_over_http_is_applied_and_journalled(
     assert status == HTTPStatus.OK
     assert body["record"]["status"] == "applied"
     assert len(transport.writes) == 1
-    assert journal.count() == 1
-    assert journal.recent()[0].reason == "socket test"
+    # Two records per applied command: the intent, then the outcome.
+    assert journal.count() == 2
+    assert [record.status for record in journal.recent()] == [
+        CommandStatus.ISSUED,
+        CommandStatus.APPLIED,
+    ]
+    assert journal.recent()[-1].reason == "socket test"
 
 
 def test_a_negative_content_length_is_refused(
@@ -461,3 +466,20 @@ def test_a_non_ascii_token_reads_as_wrong_not_as_a_crash(
     assert status == HTTPStatus.FORBIDDEN
     assert body["error"] == "missing or invalid token"
     assert transport.writes == []
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["[::1]:8322", "[::1]", "::1", "127.0.0.1:8322", "localhost:8322", "LOCALHOST"],
+)
+def test_every_loopback_spelling_is_recognised(host: str) -> None:
+    """A bracketed IPv6 literal with a port is still this machine. Refusing it
+    was fail-closed but wrong, and wrong in the direction that teaches people
+    to loosen checks."""
+
+    assert allowed(host=host) is None
+
+
+@pytest.mark.parametrize("host", ["[::1", "evil.test:8322", "[2001:db8::1]:8322", ""])
+def test_everything_else_is_still_refused(host: str) -> None:
+    assert allowed(host=host) == "unexpected Host header"

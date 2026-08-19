@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 from geopilot.control import (
+    CommandRecord,
     CommandRequest,
     CommandStatus,
     ControlConfigurationError,
@@ -221,12 +222,72 @@ def test_every_attempt_is_journalled_with_its_reason() -> None:
     control.execute(command(closed=True))
     control.execute(command(target="unknown"))
 
-    assert len(journal.records) == 2
+    # The applied command leaves two records: the intent, written before the
+    # bus is touched, then the outcome. The refusal never reached the bus and
+    # leaves one.
     assert [record.status for record in journal.records] == [
+        CommandStatus.ISSUED,
         CommandStatus.APPLIED,
         CommandStatus.REFUSED,
     ]
     assert all(record.reason == "zone 1 calling for heat" for record in journal.records)
+
+
+def test_intent_reaches_the_journal_before_the_bus() -> None:
+    """The crash window this closes: a relay operated between the write and the
+    outcome record must already have left a trace. An ISSUED record with no
+    matching outcome IS the evidence of the crash."""
+
+    order: list[str] = []
+
+    class WitnessTransport:
+        def write_coil(self, request: object) -> None:
+            order.append("bus")
+
+    class WitnessJournal(InMemoryCommandJournal):
+        def append(self, record: CommandRecord) -> None:
+            order.append(f"journal:{record.status}")
+            super().append(record)
+
+    journal = WitnessJournal()
+    control = ControlService(
+        ControlPolicy(enabled=True, targets=(DAMPER,)),
+        WitnessTransport(),  # type: ignore[arg-type]
+        journal=journal,
+        clock=Clock(),
+    )
+
+    control.execute(command())
+
+    assert order == ["journal:issued", "bus", "journal:applied"]
+    assert journal.records[0].command_id == "cmd-damper_zone_1-True/issued"
+    assert journal.records[1].command_id == "cmd-damper_zone_1-True"
+
+
+def test_a_journal_that_cannot_take_the_intent_stops_the_command() -> None:
+    """Audit-first: no record, no relay. The transport must never be reached."""
+
+    writes: list[object] = []
+
+    class WitnessTransport:
+        def write_coil(self, request: object) -> None:
+            writes.append(request)
+
+    class BrokenJournal(InMemoryCommandJournal):
+        def append(self, record: CommandRecord) -> None:
+            raise RuntimeError("disk full")
+
+    control = ControlService(
+        ControlPolicy(enabled=True, targets=(DAMPER,)),
+        WitnessTransport(),  # type: ignore[arg-type]
+        journal=BrokenJournal(),
+        clock=Clock(),
+    )
+
+    with pytest.raises(RuntimeError, match="disk full"):
+        control.execute(command())
+
+    assert writes == []
 
 
 def test_a_record_serializes_to_json_safe_data() -> None:

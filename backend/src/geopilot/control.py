@@ -36,6 +36,7 @@ class ControlConfigurationError(ValueError):
 class CommandStatus(StrEnum):
     """What became of a command."""
 
+    ISSUED = "issued"
     APPLIED = "applied"
     REFUSED = "refused"
     FAILED = "failed"
@@ -257,6 +258,28 @@ class ControlService:
                     f"{RefusalCode.RATE_LIMITED}: {remaining:.1f}s remaining",
                     now,
                 )
+
+        # Intent goes to disk before the bus is touched. Without this, a crash
+        # between the write and the outcome record is an operated relay with no
+        # audit trace — the record below closes that window: an ISSUED with no
+        # matching outcome IS the evidence of the crash. Its id carries a
+        # suffix because the journal treats a re-appended command_id as a
+        # retry, and the outcome must not be swallowed as one.
+        #
+        # A journal that cannot take the intent stops the command, before any
+        # hardware moves. An audit trail that only works when it is convenient
+        # is not one.
+        self._journal.append(
+            CommandRecord(
+                command_id=f"{command.command_id}/issued",
+                target_id=command.target_id,
+                closed=command.closed,
+                reason=command.reason,
+                status=CommandStatus.ISSUED,
+                detail="write issued to the bus",
+                decided_at=now,
+            )
+        )
 
         try:
             self._transport.write_coil(
