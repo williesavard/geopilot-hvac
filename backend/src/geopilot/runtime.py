@@ -63,9 +63,15 @@ from geopilot.onewire import (
     OneWireSensorDefinition,
     SysfsOneWireBus,
 )
+from geopilot.provenance import provenance_from
 from geopilot.register_decoder import RegisterDefinition
 from geopilot.registry import InMemoryAssetRegistry
 from geopilot.sqlite_historian import SqliteMeasurementHistorian
+from geopilot.sqlite_provenance import (
+    ConfigurationEpoch,
+    SqliteProvenanceJournal,
+    provenance_path,
+)
 
 Clock = Callable[[], datetime]
 TransportFactory = Callable[[SerialSourceConfig], ModbusTransport]
@@ -212,10 +218,16 @@ class AcquisitionSession:
         bit_transport_factory: BitTransportFactory = open_bit_transport,
         clock: Clock = utc_now,
         historian: SqliteMeasurementHistorian | None = None,
+        provenance: SqliteProvenanceJournal | None = None,
     ) -> None:
         self._config = config
         self._owns_historian = historian is None
         self._historian = historian or SqliteMeasurementHistorian(config.database)
+        self._owns_provenance = provenance is None
+        self._provenance = provenance or SqliteProvenanceJournal(
+            provenance_path(config.database)
+        )
+        self._epoch = self._provenance.record(provenance_from(config), at=clock())
         self._registry = build_registry(config)
         self._pipeline = AcquisitionPipeline(
             IngestionService(
@@ -235,6 +247,23 @@ class AcquisitionSession:
         """Return the historian this session writes to."""
 
         return self._historian
+
+    @property
+    def provenance(self) -> SqliteProvenanceJournal:
+        """Return the journal recording what corrections are in effect."""
+
+        return self._provenance
+
+    @property
+    def epoch(self) -> ConfigurationEpoch | None:
+        """The epoch this session opened, or None when nothing had changed.
+
+        A new epoch means a correction moved since the last run, which is worth
+        saying out loud: it is the moment the series stops being directly
+        comparable with what came before.
+        """
+
+        return self._epoch
 
     def run_cycle(self) -> CycleOutcome:
         """Execute one acquisition cycle.
@@ -256,6 +285,8 @@ class AcquisitionSession:
 
         if self._owns_historian:
             self._historian.close()
+        if self._owns_provenance:
+            self._provenance.close()
 
     def __enter__(self) -> AcquisitionSession:
         return self

@@ -26,6 +26,7 @@ from collections.abc import Sequence
 from types import FrameType
 
 from geopilot.configuration import ConfigurationError, load_configuration
+from geopilot.provenance import compare
 from geopilot.runtime import AcquisitionSession, CycleOutcome, run_cycles, summarize
 
 EXIT_OK = 0
@@ -109,6 +110,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         with AcquisitionSession(config) as session:
+            _announce_epoch(session)
             outcomes = run_cycles(
                 session,
                 cycles=cycles,
@@ -123,6 +125,40 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(summarize(outcomes))
     failed = sum(1 for outcome in outcomes if not outcome.succeeded)
     return EXIT_FAILED_CYCLES if failed else EXIT_OK
+
+
+def _announce_epoch(session: AcquisitionSession) -> None:
+    """Say when a correction moved, even under --quiet.
+
+    A new epoch is the moment the series stops being directly comparable with
+    what came before, and it happens because somebody edited a file — so it is
+    worth one line in the journal that they can find in March. `--quiet`
+    silences routine cycle chatter; it does not silence this.
+    """
+
+    epoch = session.epoch
+    if epoch is None:
+        return
+
+    previous = session.provenance.epochs()
+    print(
+        f"configuration epoch {epoch.short_fingerprint} opened at "
+        f"{epoch.recorded_at.isoformat(timespec='seconds')} "
+        f"({len(epoch.sensors)} sensors)",
+        file=sys.stderr,
+    )
+
+    if len(previous) < 2:
+        print("  first epoch: nothing recorded before this", file=sys.stderr)
+        return
+
+    for change in compare(previous[-2].sensors, epoch.sensors):
+        print(f"  {change.describe()}", file=sys.stderr)
+    print(
+        "  measurements before and after this moment had different corrections "
+        "applied; see docs/PROVENANCE.md",
+        file=sys.stderr,
+    )
 
 
 if __name__ == "__main__":
