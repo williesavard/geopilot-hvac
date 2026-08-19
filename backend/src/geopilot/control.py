@@ -16,6 +16,7 @@ somebody else caused.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -203,6 +204,7 @@ class ControlService:
         self._transport = transport
         self._journal = journal or InMemoryCommandJournal()
         self._clock = clock if callable(clock) else _utc_now
+        self._gate = threading.Lock()
         self._last_applied: dict[str, datetime] = {}
 
     @property
@@ -212,8 +214,20 @@ class ControlService:
         return self._journal
 
     def execute(self, command: CommandRequest) -> CommandRecord:
-        """Evaluate a command, execute it if permitted, and record the outcome."""
+        """Evaluate a command, execute it if permitted, and record the outcome.
 
+        Serialised, because the surface serves each request on its own thread
+        and the rate limit is check-then-act: two concurrent commands for the
+        same relay would both read "long enough ago" and both write, which is
+        exactly the chatter the interval exists to prevent. Holding the lock
+        across the write also serialises the bus access, which RS485 demands
+        anyway.
+        """
+
+        with self._gate:
+            return self._execute(command)
+
+    def _execute(self, command: CommandRequest) -> CommandRecord:
         now = self._clock()
 
         if not self._policy.enabled:

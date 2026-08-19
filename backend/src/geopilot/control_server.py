@@ -263,9 +263,23 @@ class ControlSurface:
             return "unexpected Host header"
         if origin is not None and not _is_loopback(urlsplit(origin).netloc):
             return "cross-origin request"
-        if token is None or not secrets.compare_digest(token, self._token):
+        if token is None or not _matches(token, self._token):
             return "missing or invalid token"
         return None
+
+
+def _matches(presented: str, expected: str) -> bool:
+    """Constant-time comparison that survives a hostile header.
+
+    `secrets.compare_digest` raises TypeError on non-ASCII strings, and a header
+    is attacker-shaped input: a token containing an accented byte must read as
+    wrong, not as an unhandled exception in the request thread.
+    """
+
+    return secrets.compare_digest(
+        presented.encode("utf-8", "surrogateescape"),
+        expected.encode("utf-8", "surrogateescape"),
+    )
 
 
 def _is_loopback(host: str | None) -> bool:
@@ -324,6 +338,11 @@ def build_handler(surface: ControlSurface) -> type[BaseHTTPRequestHandler]:
             try:
                 length = int(self.headers.get("Content-Length", "0"))
             except ValueError:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "bad Content-Length"})
+                return
+            if length < 0:
+                # read(-1) on a socket reads until the peer closes it, which
+                # turns one header into an unbounded allocation.
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "bad Content-Length"})
                 return
             if length > MAX_BODY_BYTES:

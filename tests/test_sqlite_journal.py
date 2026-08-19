@@ -265,3 +265,32 @@ def test_a_journal_that_cannot_remember_does_not_block_the_guard() -> None:
     )
 
     assert outcome.status is CommandStatus.APPLIED
+
+
+def test_the_journal_accepts_writes_from_another_thread(tmp_path: Path) -> None:
+    """The surface journals from whichever request thread carried the command.
+
+    sqlite3's default same-thread check would raise at the exact moment an
+    APPLIED command should be recorded — after the relay has already moved —
+    leaving an operated relay with no audit record.
+    """
+
+    import threading
+
+    journal = SqliteCommandJournal(tmp_path / "threads.sqlite3")
+    failures: list[Exception] = []
+
+    def append() -> None:
+        try:
+            journal.append(record("cross-thread"))
+        except Exception as error:  # noqa: BLE001 - the failure IS the assertion
+            failures.append(error)
+
+    worker = threading.Thread(target=append)
+    worker.start()
+    worker.join(timeout=5.0)
+
+    assert failures == []
+    assert journal.count() == 1
+    assert journal.recent()[0].command_id == "cross-thread"
+    journal.close()

@@ -6,6 +6,7 @@ Every test uses a fake write transport. Nothing here reaches hardware.
 from __future__ import annotations
 
 import ast
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -306,3 +307,59 @@ def test_control_module_does_not_reach_the_domain_or_storage() -> None:
             "geopilot.snapshot",
         }
     )
+
+
+class BlockingTransport:
+    """A write that stalls until released, so two threads can be caught inside
+    the check-then-act window at once."""
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.writes: list[str] = []
+
+    def write_coil(self, request: object) -> None:
+        self.writes.append(getattr(request, "target_id", "?"))
+        self.entered.set()
+        assert self.release.wait(timeout=5.0)
+
+
+def test_concurrent_commands_cannot_share_the_interval() -> None:
+    """Two simultaneous commands for one relay: exactly one may apply.
+
+    Check-then-act without a gate lets both threads read "long enough ago"
+    before either records — a double-click defeating the chatter protection.
+    """
+
+    transport = BlockingTransport()
+    control = ControlService(
+        ControlPolicy(enabled=True, targets=(DAMPER,)),
+        transport,  # type: ignore[arg-type]
+        journal=InMemoryCommandJournal(),
+        clock=Clock(),
+    )
+
+    outcomes: list[CommandStatus] = []
+
+    def press(name: str) -> None:
+        record = control.execute(
+            CommandRequest(
+                command_id=f"race-{name}", target_id="damper_zone_1",
+                closed=True, reason="double click",
+            )
+        )
+        outcomes.append(record.status)
+
+    first = threading.Thread(target=press, args=("first",))
+    second = threading.Thread(target=press, args=("second",))
+    first.start()
+    second.start()
+
+    # Let whichever thread won reach the transport, then release everything.
+    assert transport.entered.wait(timeout=5.0)
+    transport.release.set()
+    first.join(timeout=5.0)
+    second.join(timeout=5.0)
+
+    assert sorted(outcomes) == [CommandStatus.APPLIED, CommandStatus.REFUSED]
+    assert len(transport.writes) == 1

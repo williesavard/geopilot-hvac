@@ -35,6 +35,7 @@ what it did.
 from __future__ import annotations
 
 import sqlite3
+import threading
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from types import TracebackType
@@ -102,13 +103,20 @@ class SqliteCommandJournal:
             )
 
         try:
-            self._connection = sqlite3.connect(str(database))
+            # check_same_thread=False because the control surface journals from
+            # whichever request thread carried the command. Without it, the
+            # first HTTP command raises ProgrammingError at the exact moment it
+            # should be recorded — after the relay has already moved. The lock
+            # below restores the serialisation the flag turns off.
+            self._connection = sqlite3.connect(str(database), check_same_thread=False)
         except sqlite3.OperationalError as error:
             raise JournalStorageError(f"could not open {database}: {error}") from error
 
-        self._connection.execute("PRAGMA journal_mode=WAL")
-        self._connection.execute(f"PRAGMA synchronous={mode}")
-        self._initialize_schema()
+        self._lock = threading.Lock()
+        with self._lock:
+            self._connection.execute("PRAGMA journal_mode=WAL")
+            self._connection.execute(f"PRAGMA synchronous={mode}")
+            self._initialize_schema()
 
     def append(self, record: CommandRecord) -> None:
         """Store one command attempt.
@@ -120,7 +128,7 @@ class SqliteCommandJournal:
         """
 
         decided_us, decided_offset = _to_storage(record.decided_at)
-        with self._connection:
+        with self._lock, self._connection:
             self._connection.execute(
                 f"INSERT OR IGNORE INTO commands ({_COLUMNS}) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -161,16 +169,18 @@ class SqliteCommandJournal:
             query += " LIMIT ?"
             parameters = (limit,)
 
-        rows = self._connection.execute(query, parameters).fetchall()
+        with self._lock:
+            rows = self._connection.execute(query, parameters).fetchall()
         return tuple(_row_to_record(cast(tuple[Any, ...], row)) for row in reversed(rows))
 
     def for_target(self, target_id: str) -> tuple[CommandRecord, ...]:
         """Everything ever asked of one relay, oldest first."""
 
-        rows = self._connection.execute(
-            f"SELECT {_COLUMNS} FROM commands WHERE target_id = ? ORDER BY seq",
-            (target_id,),
-        ).fetchall()
+        with self._lock:
+            rows = self._connection.execute(
+                f"SELECT {_COLUMNS} FROM commands WHERE target_id = ? ORDER BY seq",
+                (target_id,),
+            ).fetchall()
         return tuple(_row_to_record(cast(tuple[Any, ...], row)) for row in rows)
 
     def last_applied_at(self, target_id: str) -> datetime | None:
@@ -181,11 +191,12 @@ class SqliteCommandJournal:
         relay was operated a moment ago and the rate limit starts over.
         """
 
-        row = self._connection.execute(
-            "SELECT decided_at_us, decided_at_offset_s FROM commands "
-            "WHERE target_id = ? AND status = ? ORDER BY seq DESC LIMIT 1",
-            (target_id, CommandStatus.APPLIED.value),
-        ).fetchone()
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT decided_at_us, decided_at_offset_s FROM commands "
+                "WHERE target_id = ? AND status = ? ORDER BY seq DESC LIMIT 1",
+                (target_id, CommandStatus.APPLIED.value),
+            ).fetchone()
         if row is None:
             return None
         return _from_storage(int(row[0]), int(row[1]))
@@ -193,7 +204,8 @@ class SqliteCommandJournal:
     def count(self) -> int:
         """How many attempts have been recorded."""
 
-        row = self._connection.execute("SELECT COUNT(*) FROM commands").fetchone()
+        with self._lock:
+            row = self._connection.execute("SELECT COUNT(*) FROM commands").fetchone()
         return int(cast(tuple[Any, ...], row)[0])
 
     def backup(self, destination: str | Path) -> None:
@@ -210,14 +222,16 @@ class SqliteCommandJournal:
 
         target = sqlite3.connect(str(destination))
         try:
-            self._connection.backup(target)
+            with self._lock:
+                self._connection.backup(target)
         finally:
             target.close()
 
     def close(self) -> None:
         """Close the connection."""
 
-        self._connection.close()
+        with self._lock:
+            self._connection.close()
 
     def __enter__(self) -> SqliteCommandJournal:
         return self
