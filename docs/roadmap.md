@@ -90,6 +90,7 @@ rules and first tested code path.
 - `docs/CONTROL_SURFACE_ADR.md`
 - `docs/COMMAND_JOURNAL_STORAGE.md`
 - `docs/AUTOMATIC_CONTROL_ADR.md`
+- `docs/SECURITY_REVIEW.md`
 - `docs/hardware.md`
 - `docs/hardware/README.md`
 - repository governance files

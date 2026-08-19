@@ -4,14 +4,21 @@ The guard's own rules are covered in `test_control.py`. What is tested here is
 the doorway: who is allowed to knock, what a malformed knock does, and that the
 state on the page came from the equipment rather than from memory.
 
-No test opens a socket or a serial port.
+No test here opens a serial port. The block at the bottom does open a real
+socket, deliberately: the one bug that reached main lived between the threaded
+server and the journal, where no socketless test could see it.
 """
 
 from __future__ import annotations
 
+import json
 import threading
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from http import HTTPStatus
+from http.client import HTTPConnection
+from pathlib import Path
+from typing import Any
 
 import pytest
 from geopilot.control import (
@@ -25,8 +32,10 @@ from geopilot.control_server import (
     CONTENT_SECURITY_POLICY,
     ControlSurface,
     build_handler,
+    serve,
 )
 from geopilot.modbus_write import FakeModbusWriteTransport
+from geopilot.sqlite_journal import SqliteCommandJournal
 
 TOKEN = "test-token"
 NOW = datetime(2026, 8, 16, 12, 0, tzinfo=UTC)
@@ -335,3 +344,120 @@ def test_a_surface_without_a_prober_says_so() -> None:
 
     assert status is HTTPStatus.NOT_IMPLEMENTED
     assert "without a prober" in str(body["error"])
+
+
+# --- Through a real socket ----------------------------------------------------
+#
+# Everything above tests the decisions; these test the doorway itself, because
+# the one bug that reached main — the journal raising from a request thread —
+# was invisible to any test that never started the ThreadingHTTPServer.
+
+
+@pytest.fixture
+def live_server(
+    tmp_path: Path,
+) -> Iterator[tuple[str, int, FakeModbusWriteTransport, SqliteCommandJournal]]:
+    """A real server on an ephemeral loopback port, with the real journal."""
+
+    transport = FakeModbusWriteTransport()
+    journal = SqliteCommandJournal(tmp_path / "commands.sqlite3")
+    policy = ControlPolicy(enabled=True, targets=(target(),))
+    made = ControlSurface(
+        ControlService(policy, transport, journal=journal),
+        policy,
+        page=lambda token: f"<html>{token}</html>",
+        token=TOKEN,
+    )
+    server = serve(made, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield str(server.server_address[0]), server.server_address[1], transport, journal
+    finally:
+        server.shutdown()
+        server.server_close()
+        journal.close()
+
+
+def request(
+    host: str,
+    port: int,
+    method: str,
+    path: str,
+    *,
+    body: bytes | None = None,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    connection = HTTPConnection(host, port, timeout=5)
+    try:
+        sent = {"Host": f"127.0.0.1:{port}", "X-GeoPilot-Token": TOKEN}
+        sent.update(headers or {})
+        connection.request(method, path, body=body, headers=sent)
+        response = connection.getresponse()
+        return response.status, json.loads(response.read() or b"{}")
+    finally:
+        connection.close()
+
+
+def test_a_command_over_http_is_applied_and_journalled(
+    live_server: tuple[str, int, FakeModbusWriteTransport, SqliteCommandJournal],
+) -> None:
+    """The regression that reached main: the request thread is not the thread
+    that opened the journal, and the record must land anyway."""
+
+    host, port, transport, journal = live_server
+
+    status, body = request(
+        host,
+        port,
+        "POST",
+        "/api/command",
+        body=json.dumps(
+            {"target_id": "target_zone_1", "closed": True, "reason": "socket test"}
+        ).encode(),
+    )
+
+    assert status == HTTPStatus.OK
+    assert body["record"]["status"] == "applied"
+    assert len(transport.writes) == 1
+    assert journal.count() == 1
+    assert journal.recent()[0].reason == "socket test"
+
+
+def test_a_negative_content_length_is_refused(
+    live_server: tuple[str, int, FakeModbusWriteTransport, SqliteCommandJournal],
+) -> None:
+    """read(-1) on a socket reads until the peer closes it: one header must not
+    become an unbounded allocation."""
+
+    host, port, transport, _ = live_server
+
+    status, body = request(
+        host, port, "POST", "/api/command", body=b"", headers={"Content-Length": "-1"}
+    )
+
+    assert status == HTTPStatus.BAD_REQUEST
+    assert "Content-Length" in body["error"]
+    assert transport.writes == []
+
+
+def test_a_non_ascii_token_reads_as_wrong_not_as_a_crash(
+    live_server: tuple[str, int, FakeModbusWriteTransport, SqliteCommandJournal],
+) -> None:
+    """`secrets.compare_digest` raises TypeError on non-ASCII strings, and a
+    header is attacker-shaped input."""
+
+    host, port, transport, _ = live_server
+
+    status, body = request(
+        host,
+        port,
+        "POST",
+        "/api/command",
+        body=b"{}",
+        headers={"X-GeoPilot-Token": "jeton-piégé-é"},
+    )
+
+    assert status == HTTPStatus.FORBIDDEN
+    assert body["error"] == "missing or invalid token"
+    assert transport.writes == []
