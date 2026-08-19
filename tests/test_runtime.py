@@ -513,3 +513,62 @@ def test_a_bit_read_failure_is_structured(tmp_path: Path) -> None:
         assert outcome.report is not None
         assert outcome.report.success_count == 1
         assert outcome.report.failure_count == 1
+
+
+def test_a_session_records_the_configuration_it_recorded_under(tmp_path: Path) -> None:
+    """A stored value has already had its scale and offset applied. Without an
+    epoch beside it, nothing says which scale and which offset."""
+
+    database = tmp_path / "db.sqlite3"
+
+    with session_for(database, FakeTransport()) as session:
+        session.run_cycle()
+        epoch = session.epoch
+
+        assert epoch is not None
+        derived = epoch.sensor("sensor_loop_in")
+        assert derived is not None
+        assert derived.scale == 0.1
+        assert derived.reference == "1:input:1"
+
+    assert (tmp_path / "provenance.sqlite3").is_file()
+
+
+def test_restarting_without_a_change_opens_no_new_epoch(tmp_path: Path) -> None:
+    """On a timer this constructor runs once a minute for a year."""
+
+    database = tmp_path / "db.sqlite3"
+
+    with session_for(database, FakeTransport()) as first:
+        assert first.epoch is not None
+    with session_for(database, FakeTransport()) as second:
+        assert second.epoch is None
+        assert second.provenance.count() == 1
+
+
+def test_a_changed_scale_opens_a_new_epoch(tmp_path: Path) -> None:
+    """The moment the series stops being directly comparable with itself."""
+
+    database = tmp_path / "db.sqlite3"
+
+    with session_for(database, FakeTransport()):
+        pass
+
+    rescaled = document(database)
+    rescaled["read"][0]["scale"] = 0.5
+
+    with AcquisitionSession(
+        parse_configuration(rescaled, created_at=STAMP),
+        transport_factory=lambda _source: FakeTransport(),
+        clock=lambda: STAMP,
+    ) as session:
+        assert session.epoch is not None
+        assert session.provenance.count() == 2
+
+        changes = session.provenance.changes_between(
+            STAMP - timedelta(days=1), STAMP + timedelta(days=1)
+        )
+        described = [
+            change.describe() for _, changes_here in changes for change in changes_here
+        ]
+        assert described == ["sensor_loop_in: scale 0.1 → 0.5"]

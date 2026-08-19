@@ -14,8 +14,10 @@ from pathlib import Path
 import pytest
 from geopilot.control import CommandRecord, CommandStatus
 from geopilot.domain import DataQuality, Measurement
+from geopilot.provenance import ProvenanceKind, SensorProvenance
 from geopilot.sqlite_historian import SqliteMeasurementHistorian
 from geopilot.sqlite_journal import SqliteCommandJournal
+from geopilot.sqlite_provenance import SqliteProvenanceJournal, provenance_path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
@@ -237,3 +239,37 @@ def test_the_backup_of_a_journal_is_readable_as_a_journal(tmp_path: Path) -> Non
 
     with SqliteCommandJournal(destination) as restored:
         assert restored.count() == 4
+
+
+def test_the_provenance_journal_is_copied_too(tmp_path: Path) -> None:
+    """Retention prunes measurements. The record of what those measurements
+    meant has to outlive them, which means it has to be in the backup."""
+
+    database = tmp_path / "geopilot.sqlite3"
+    SqliteMeasurementHistorian(database).close()
+
+    journal = SqliteProvenanceJournal(provenance_path(database))
+    journal.record(
+        (
+            SensorProvenance(
+                "sensor_loop_in", ProvenanceKind.ONEWIRE, "28-aaaa", "degC", offset=0.31
+            ),
+        ),
+        at=datetime(2026, 9, 1, tzinfo=UTC),
+    )
+    journal.close()
+
+    into = tmp_path / "backup"
+    into.mkdir()
+
+    assert main(["--database", str(database), "--into", str(into), "--stamp", "T"]) == 0
+
+    copied = sorted(item.name for item in into.iterdir())
+    assert "provenance-T.sqlite3" in copied
+
+    restored = SqliteProvenanceJournal(into / "provenance-T.sqlite3")
+    epoch = restored.latest()
+    assert epoch is not None
+    assert epoch.sensor("sensor_loop_in") is not None
+    assert epoch.sensor("sensor_loop_in").offset == 0.31  # type: ignore[union-attr]
+    restored.close()

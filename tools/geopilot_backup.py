@@ -8,6 +8,10 @@ Two databases matter and they are not interchangeable:
 
 - **the measurements.** A year of them cannot be re-created. Losing a week of
   winter is losing a week of the evidence the recording exists to produce;
+- **the provenance journal.** It records which calibration offsets and scales
+  were in effect for which stretch of the recording. Measurements whose
+  corrections are unknown are numbers, not evidence, and retention will
+  eventually prune the measurements while this must outlive them.
 - **the command journal.** Its whole purpose is to still exist after something
   went wrong, which makes "it was only on the SD card" an odd place to keep it.
 
@@ -34,6 +38,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from geopilot.configuration import ConfigurationError, load_configuration
+from geopilot.sqlite_provenance import provenance_path
 
 EXIT_OK = 0
 EXIT_USAGE = 1
@@ -52,6 +57,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--journal",
         help="command journal; defaults to commands.sqlite3 beside the measurements",
+    )
+    parser.add_argument(
+        "--provenance",
+        help="provenance journal; defaults to provenance.sqlite3 beside the measurements",
     )
     parser.add_argument("--into", required=True, help="directory to write the backups into")
     parser.add_argument(
@@ -130,6 +139,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.journal
         else database.with_name("commands.sqlite3")
     )
+    provenance = (
+        Path(arguments.provenance)
+        if arguments.provenance
+        else Path(provenance_path(database))
+    )
 
     into = Path(arguments.into)
     if not into.is_dir():
@@ -140,7 +154,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     failures = 0
     copied = 0
-    for source in (database, journal):
+    for source in (database, journal, provenance):
         if not source.exists():
             # The journal legitimately does not exist until a command is issued.
             print(f"skipped {source.name}: not present")
