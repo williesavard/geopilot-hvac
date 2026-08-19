@@ -49,6 +49,16 @@ Raspberry Pi, so a stale lock cannot survive a reboot.
 
 Two adapters get two lock files and never block each other.
 
+**Under systemd, `/run/lock` has to be granted back.** Every unit sets
+`ProtectSystem=strict`, which makes `/run` read-only along with everything else,
+and the fail-open behaviour below then hides the consequence completely: no lock
+file, no coordination, no complaint. The units carry `ReadWritePaths=/run/lock`
+for exactly this, and `tests/test_systemd_units.py` fails if one loses it.
+
+The temp-directory fallback is not a safety net here. `PrivateTmp=true` gives
+each unit its own `/tmp`, so two processes falling back would take unrelated
+locks and both believe themselves protected.
+
 The lock file is opened once per transport and the advisory lock is taken and
 released per exchange. Opening a file for every read would cost more than the
 reads do.
