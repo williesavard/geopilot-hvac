@@ -11,3 +11,10 @@ runtime components.
 | --- | --- |
 | `geopilot_poll.py` | Record an installation described by a TOML file, once or continuously. The command that makes GeoPilot run. See [Acquisition Runtime](../docs/ACQUISITION_RUNTIME.md). |
 | `modbus_smoke.py` | Manual read-only Modbus RTU check for hardware bench work. Requires the optional `modbus` extra and explicit bus coordinates. Never runs in CI. See [Modbus Smoke Tool](../docs/MODBUS_SMOKE_TOOL.md). |
+
+## `geopilot_dossier.py`
+
+Assembles the evidence package an engineer receives: bucketed series, coverage,
+calibration history, and a method statement that says what the numbers cannot
+support. Reads the database only — no address, no serial numbers, nothing from
+the private site notes. See [the dossier](../docs/DOSSIER.md).

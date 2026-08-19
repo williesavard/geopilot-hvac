@@ -92,6 +92,7 @@ rules and first tested code path.
 - `docs/AUTOMATIC_CONTROL_ADR.md`
 - `docs/SECURITY_REVIEW.md`
 - `docs/PROVENANCE.md`
+- `docs/DOSSIER.md`
 - `docs/hardware.md`
 - `docs/hardware/README.md`
 - repository governance files
